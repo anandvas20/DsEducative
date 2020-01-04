@@ -1,4 +1,4 @@
-package pattern;
+package slidingwindow;
 
 /**
  * Problem Statement # Given an array of positive numbers and a positive number
