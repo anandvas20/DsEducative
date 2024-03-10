@@ -1,0 +1,61 @@
+import static org.mockito.Mockito.*;
+
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mock;
+import org.springframework.boot.test.context.SpringBootTest;
+
+@SpringBootTest
+public class ChannelPerformanceServiceTest {
+
+    private ChannelPerformanceService channelPerformanceService;
+
+    @Mock
+    private ChannelPerformanceSql channelPerformanceSqlMock;
+
+    @Mock
+    private Cache<LocalDate, GrandTotalsMap> channelPerformanceCacheMock;
+
+    @BeforeEach
+    public void setUp() {
+        channelPerformanceService = new ChannelPerformanceService(channelPerformanceSqlMock, channelPerformanceCacheMock);
+    }
+
+    @Test
+    public void testRefreshChannelPerformanceCache() {
+        // Mock the behavior of channelPerformanceSql.getGrandTotals
+        LocalDate currentDate = LocalDate.now();
+        List<GrandTotal> grandTotals = new ArrayList<>();
+        grandTotals.add(new GrandTotal()); // Assuming GrandTotal has a default constructor
+        when(channelPerformanceSqlMock.getGrandTotals(anyString(), anyString(), anyString())).thenReturn(grandTotals);
+
+        // Call the method under test
+        channelPerformanceService.refreshChannelPerformanceCache();
+
+        // Verify that the cache is updated with the expected values
+        verify(channelPerformanceCacheMock).put(eq(currentDate), any(GrandTotalsMap.class));
+    }
+
+    @Test
+    public void testGetDailyChannelTotalsByDate() {
+        // Mock the behavior of channelPerformanceCache.get
+        LocalDate date = LocalDate.now();
+        GrandTotalsMap grandTotalsMapMock = mock(GrandTotalsMap.class);
+        List<GrandTotal> grandTotals = new ArrayList<>();
+        grandTotals.add(new GrandTotal()); // Assuming GrandTotal has a default constructor
+        when(grandTotalsMapMock.getGrandTotalsMap()).thenReturn(Collections.singletonMap(date, grandTotals));
+        when(channelPerformanceCacheMock.get(date)).thenReturn(grandTotalsMapMock);
+
+        // Call the method under test
+        List<SalesData> result = channelPerformanceService.getDailyChannelTotalsByDate(date);
+
+        // Verify the result
+        assertNotNull(result);
+        assertFalse(result.isEmpty());
+        // Add more assertions as needed
+    }
+}
