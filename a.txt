@@ -1,84 +1,19 @@
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.vzw.fc_inbound_ms.repository.EventStatusRepository;
-import com.vzw.fc_inbound_ms.dto.ConsumerDTO;
-import com.vzw.fc_inbound_ms.dto.SyncEventDTO;
-import com.vzw.fc_inbound_ms.entity.EventEntity;
-import com.vzw.fc_inbound_ms.exceptions.ExceptionalAdvice;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.scheduling.annotation.Async;
-import org.springframework.stereotype.Service;
+import com.vzw.inbound.entity.ConsumerEntity;
+import com.vzw.inbound.entity.EventEntity;
+import com.vzw.inbound.entity.SyncEventEntity;
+import com.vzw.inbound.repository.EventStatusRepository;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.springframework.transaction.annotation.Transactional;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+import org.springframework.boot.test.context.SpringBootTest;
 
-import java.util.concurrent.CompletableFuture;
+import java.util.Collections;
 
-@Service
-public class KafkaConsumerService {
-
-    private static final Logger log = LoggerFactory.getLogger(KafkaConsumerService.class);
-
-    @Autowired
-    private EventStatusRepository eventStatusRepository;
-
-    @Autowired
-    private ObjectMapper objectMapper;
-
-    @KafkaListener(topics = "${spring.kafka.consumer.topic.secondary}", groupId = "${spring.kafka.consumer.group-id}")
-    public void consume(ConsumerRecord<String, String> consumerRecord) {
-        log.info("From topic: {}", consumerRecord.topic());
-        log.info("Received message: {}", consumerRecord.value());
-
-        ConsumerDTO consumerData;
-        try {
-            // Parse the message from Kafka
-            consumerData = objectMapper.readValue(consumerRecord.value(), ConsumerDTO.class);
-            if (consumerData != null) {
-                CompletableFuture.runAsync(() -> saveEvent(consumerData, consumerRecord.value()));
-            }
-        } catch (JsonProcessingException e) {
-            log.error("Error while deserializing Kafka message: {}", consumerRecord.value(), e);
-            // Handle the exception, possibly notifying or sending to a dead-letter queue (DLQ)
-            ExceptionalAdvice.handleKafkaException(e, consumerRecord.value());
-        } catch (Exception e) {
-            log.error("Unexpected error during Kafka message processing: {}", consumerRecord.value(), e);
-            // Handle unexpected exceptions
-            ExceptionalAdvice.handleKafkaException(e, consumerRecord.value());
-        }
-    }
-
-    @Async
-    @Transactional
-    public void saveEvent(ConsumerDTO consumerData, String messageValue) {
-        try {
-            // Loop through each SyncEventDTO and save it to the database
-            for (SyncEventDTO event : consumerData.getExtSyncEvents()) {
-                EventEntity eventEntity = new EventEntity();
-                eventEntity.setEventKey(event.getPriceDataId());
-                eventEntity.setEventType(event.getEventType());
-                eventEntity.setEventValueMessage(messageValue);
-
-                // Attempt to save the event, retry on transient failures
-                saveEventToDatabase(eventEntity);
-            }
-        } catch (Exception e) {
-            log.error("Error saving event to database for message: {}", messageValue, e);
-            // Handle any exception during database operations
-            ExceptionalAdvice.handleDatabaseException(e, messageValue);
-        }
-    }
-
-    private void saveEventToDatabase(EventEntity eventEntity) {
-        try {
-            eventStatusRepository.save(eventEntity);
-            log.info("Event saved successfully with key: {}", eventEntity.getEventKey());
-        } catch (Exception e) {
-            log.error("Failed to save event to database with key: {}", eventEntity.getEventKey(), e);
-            // Optionally, retry or handle specific database issues (e.g., deadlock, connection failure)
-            throw e;  // Re-throw the exception to be handled in saveEvent
-        }
-    }
-}
+import static org.mockito.Mockito.*;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
