@@ -2,7 +2,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.vzw.inbound.entity.ConsumerEntity;
 import com.vzw.inbound.entity.EventEntity;
-import com.vzw.inbound.entity.SyncEventEntity;
 import com.vzw.inbound.repository.EventStatusRepository;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,3 +16,86 @@ import java.util.Collections;
 import static org.mockito.Mockito.*;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+
+@SpringBootTest(classes = KafkaConsumerServiceTest.class)
+public class KafkaConsumerServiceTest {
+
+    @Mock
+    private EventStatusRepository eventStatusRepository;
+
+    @Mock
+    private ObjectMapper objectMapper;
+
+    @InjectMocks
+    private KafkaConsumerService kafkaConsumerService;
+
+    @BeforeEach
+    void setup() {
+        MockitoAnnotations.openMocks(this);
+    }
+
+    @Test
+    void testConsume() throws JsonProcessingException {
+        // Mock the ConsumerRecord
+        ConsumerRecord<String, String> consumerRecord = mock(ConsumerRecord.class);
+
+        // Mock the Kafka record topic and value
+        when(consumerRecord.topic()).thenReturn("test-topic");
+        when(consumerRecord.value()).thenReturn("{\"extSyncEvents\":[]}");
+
+        // Create a dummy ConsumerEntity
+        ConsumerEntity consumerEntity = new ConsumerEntity();
+        consumerEntity.setExtSyncEvents(Collections.emptyList());
+
+        // Mock ObjectMapper behavior
+        when(objectMapper.readValue(anyString(), eq(ConsumerEntity.class))).thenReturn(consumerEntity);
+
+        // Call the consume method
+        kafkaConsumerService.consume(consumerRecord);
+
+        // Verify that ObjectMapper is called once to deserialize the record
+        verify(objectMapper, times(1)).readValue(anyString(), eq(ConsumerEntity.class));
+
+        // Verify that the repository save method is never called, as there are no sync events
+        verify(eventStatusRepository, never()).save(any(EventEntity.class));
+    }
+
+    @Test
+    void testConsumeWithNullConsumerDTO() throws JsonProcessingException {
+        // Mock the ConsumerRecord
+        ConsumerRecord<String, String> consumerRecord = mock(ConsumerRecord.class);
+
+        // Mock a null value in Kafka record
+        when(consumerRecord.value()).thenReturn(null);
+
+        // Call the consume method
+        kafkaConsumerService.consume(consumerRecord);
+
+        // Verify that ObjectMapper is not called since the value is null
+        verify(objectMapper, never()).readValue(anyString(), eq(ConsumerEntity.class));
+
+        // Verify that the repository save method is not called
+        verify(eventStatusRepository, never()).save(any(EventEntity.class));
+    }
+
+    @Test
+    void testConsumeWithInvalidJson() throws JsonProcessingException {
+        // Mock the ConsumerRecord
+        ConsumerRecord<String, String> consumerRecord = mock(ConsumerRecord.class);
+
+        // Mock an invalid JSON string in Kafka record
+        when(consumerRecord.value()).thenReturn("invalid_json");
+
+        // Mock ObjectMapper to throw a JsonProcessingException
+        when(objectMapper.readValue(anyString(), eq(ConsumerEntity.class))).thenThrow(JsonProcessingException.class);
+
+        // Call the consume method
+        kafkaConsumerService.consume(consumerRecord);
+
+        // Verify that ObjectMapper was called once and threw the exception
+        verify(objectMapper, times(1)).readValue(anyString(), eq(ConsumerEntity.class));
+
+        // Verify that the repository save method is never called due to exception
+        verify(eventStatusRepository, never()).save(any(EventEntity.class));
+    }
+}
