@@ -99,3 +99,87 @@ public class KafkaConsumerServiceTest {
         verify(eventStatusRepository, never()).save(any(EventEntity.class));
     }
 }
+
+
+
+package com.vzw.inbound.service;
+
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.*;
+
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.SendResult;
+
+import java.util.concurrent.CompletableFuture;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class KafkaProducerServiceTest {
+
+    @Mock
+    private KafkaTemplate<String, String> kafkaTemplate;
+
+    @InjectMocks
+    private KafkaProducerService kafkaProducerService;
+
+    @BeforeEach
+    void setUp() {
+        MockitoAnnotations.openMocks(this);
+    }
+
+    @Test
+    void testSendMessageSuccess() {
+        // Given
+        String topic = "test-topic";
+        String message = "Test message";
+        
+        CompletableFuture<SendResult<String, String>> future = CompletableFuture.completedFuture(mock(SendResult.class));
+        when(kafkaTemplate.send(anyString(), anyString())).thenReturn(future);
+
+        // When
+        kafkaProducerService.sendMessage(topic, message);
+
+        // Then
+        verify(kafkaTemplate, times(1)).send(topic, message);
+    }
+
+    @Test
+    void testSendMessageFailure() {
+        // Given
+        String topic = "test-topic";
+        String message = "Test message";
+        
+        CompletableFuture<SendResult<String, String>> future = new CompletableFuture<>();
+        future.completeExceptionally(new RuntimeException("Kafka error"));
+        when(kafkaTemplate.send(anyString(), anyString())).thenReturn(future);
+
+        // When
+        Exception exception = assertThrows(RuntimeException.class, () -> {
+            kafkaProducerService.sendMessage(topic, message);
+        });
+
+        // Then
+        assertEquals("Kafka error", exception.getCause().getMessage());
+        verify(kafkaTemplate, times(1)).send(topic, message);
+    }
+
+    @Test
+    void testSendMessageNoExceptions() {
+        // Given
+        String topic = "test-topic";
+        String message = "Test message";
+        when(kafkaTemplate.send(topic, message)).thenReturn(CompletableFuture.completedFuture(null));
+
+        // When
+        kafkaProducerService.sendMessage(topic, message);
+
+        // Then
+        verify(kafkaTemplate, times(1)).send(topic, message);
+    }
+}
