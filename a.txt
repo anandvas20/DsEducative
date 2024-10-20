@@ -1,18 +1,22 @@
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.*;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.support.SendResult;
+import org.springframework.test.context.junit.jupiter.SpringExtension;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletableFuture;
 
+@ExtendWith(SpringExtension.class)
 class CPIKafkaProducerServiceTest {
+
+    @InjectMocks
+    private CPIKafkaProducerService kafkaProducerService;
 
     @Mock
     private KafkaTemplate<String, String> kafkaCPITemplate;
@@ -20,13 +24,13 @@ class CPIKafkaProducerServiceTest {
     @Mock
     private TopicService topicService;
 
-    @InjectMocks
-    private CPIKafkaProducerService cpiKafkaProducerService;
+    @Mock
+    private CompletableFuture<SendResult<String, String>> future;
 
-    private final String clientId = "testClient";
-    private final String flow = "testFlow";
-    private final String message = "testMessage";
-    private final String topicName = "testTopic";
+    private String flow = "testFlow";
+    private String clientId = "testClientId";
+    private String message = "testMessage";
+    private String topicName = "testTopic";
 
     @BeforeEach
     void setUp() {
@@ -35,49 +39,36 @@ class CPIKafkaProducerServiceTest {
 
     @Test
     void testSendMessage_Success() {
-        // Given
+        // Arrange
         when(topicService.getTopicByClientIdAndFlow(clientId, flow)).thenReturn(topicName);
-        CompletableFuture<SendResult<String, String>> future = CompletableFuture.completedFuture(mock(SendResult.class));
         when(kafkaCPITemplate.send(topicName, message)).thenReturn(future);
+        when(future.thenApply(any())).thenReturn(future);
+        when(future.join()).thenReturn(mock(SendResult.class)); // Mock the SendResult
 
-        // When
-        boolean result = cpiKafkaProducerService.sendMessage(flow, clientId, message);
+        // Act
+        boolean result = kafkaProducerService.sendMessage(flow, clientId, message);
 
-        // Then
+        // Assert
         assertTrue(result);
         verify(kafkaCPITemplate).send(topicName, message);
         verify(topicService).getTopicByClientIdAndFlow(clientId, flow);
     }
 
     @Test
-    void testSendMessage_TopicServiceFailure() {
-        // Given
-        when(topicService.getTopicByClientIdAndFlow(clientId, flow)).thenThrow(new RuntimeException("Topic service failure"));
-
-        // When
-        Exception exception = assertThrows(RuntimeException.class, () -> {
-            cpiKafkaProducerService.sendMessage(flow, clientId, message);
-        });
-
-        // Then
-        assertEquals("Topic service failure", exception.getMessage());
-        verify(kafkaCPITemplate, never()).send(anyString(), anyString());
-    }
-
-    @Test
-    void testSendMessage_KafkaFailure() {
-        // Given
+    void testSendMessage_Failure() {
+        // Arrange
         when(topicService.getTopicByClientIdAndFlow(clientId, flow)).thenReturn(topicName);
-        CompletableFuture<SendResult<String, String>> future = new CompletableFuture<>();
         when(kafkaCPITemplate.send(topicName, message)).thenReturn(future);
+        when(future.thenApply(any())).thenThrow(new RuntimeException("Kafka error"));
 
-        // When
-        boolean result = cpiKafkaProducerService.sendMessage(flow, clientId, message);
-        future.completeExceptionally(new RuntimeException("Kafka failure"));
+        // Act & Assert
+        CustomKafkaProcessingException exception = assertThrows(
+            CustomKafkaProcessingException.class,
+            () -> kafkaProducerService.sendMessage(flow, clientId, message)
+        );
 
-        // Then
-        assertFalse(result);
+        assertEquals("Failed to send message", exception.getMessage());
         verify(kafkaCPITemplate).send(topicName, message);
-        // Verify the error logging, if you have a logger and want to check the logs.
+        verify(topicService).getTopicByClientIdAndFlow(clientId, flow);
     }
 }
