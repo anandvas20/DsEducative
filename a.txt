@@ -1,5 +1,3 @@
-
-
 import static org.mockito.Mockito.*;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -8,20 +6,27 @@ import org.junit.jupiter.api.Test;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
+import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.kafka.support.SendResult;
 
-class CPIKafkaListenerServiceTest {
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletableFuture;
+
+class CPIKafkaProducerServiceTest {
 
     @Mock
-    private EventService eventService;
+    private KafkaTemplate<String, String> kafkaCPITemplate;
 
     @Mock
     private TopicService topicService;
 
     @InjectMocks
-    private CPIKafkaListenerService cpiKafkaListenerService;
+    private CPIKafkaProducerService cpiKafkaProducerService;
 
-    private final String sourceSystem = "CPI";
-    private final String flow = "Inbound mag";
+    private final String clientId = "testClient";
+    private final String flow = "testFlow";
+    private final String message = "testMessage";
+    private final String topicName = "testTopic";
 
     @BeforeEach
     void setUp() {
@@ -29,51 +34,50 @@ class CPIKafkaListenerServiceTest {
     }
 
     @Test
-    void testGetTopic() {
+    void testSendMessage_Success() {
         // Given
-        String[] expectedTopics = {"topic1", "topic2"};
-        when(topicService.getTopicNamesByClientIdAndFlow(sourceSystem, flow)).thenReturn(expectedTopics);
+        when(topicService.getTopicByClientIdAndFlow(clientId, flow)).thenReturn(topicName);
+        CompletableFuture<SendResult<String, String>> future = CompletableFuture.completedFuture(mock(SendResult.class));
+        when(kafkaCPITemplate.send(topicName, message)).thenReturn(future);
 
         // When
-        String[] actualTopics = cpiKafkaListenerService.getTopic();
+        boolean result = cpiKafkaProducerService.sendMessage(flow, clientId, message);
 
         // Then
-        assertArrayEquals(expectedTopics, actualTopics);
-        verify(topicService).getTopicNamesByClientIdAndFlow(sourceSystem, flow);
+        assertTrue(result);
+        verify(kafkaCPITemplate).send(topicName, message);
+        verify(topicService).getTopicByClientIdAndFlow(clientId, flow);
     }
 
     @Test
-    void testGetContainerFactory() {
+    void testSendMessage_TopicServiceFailure() {
+        // Given
+        when(topicService.getTopicByClientIdAndFlow(clientId, flow)).thenThrow(new RuntimeException("Topic service failure"));
+
         // When
-        String containerFactory = cpiKafkaListenerService.getContainerFactory();
+        Exception exception = assertThrows(RuntimeException.class, () -> {
+            cpiKafkaProducerService.sendMessage(flow, clientId, message);
+        });
 
         // Then
-        assertEquals("cpikafkaListenerContainerFactory", containerFactory);
+        assertEquals("Topic service failure", exception.getMessage());
+        verify(kafkaCPITemplate, never()).send(anyString(), anyString());
     }
 
     @Test
-    void testGetGroupId() {
+    void testSendMessage_KafkaFailure() {
         // Given
-        String expectedGroupId = "group1";
-        when(topicService.getGroupIdByClientIdAndFlow(sourceSystem, flow)).thenReturn(expectedGroupId);
+        when(topicService.getTopicByClientIdAndFlow(clientId, flow)).thenReturn(topicName);
+        CompletableFuture<SendResult<String, String>> future = new CompletableFuture<>();
+        when(kafkaCPITemplate.send(topicName, message)).thenReturn(future);
 
         // When
-        String actualGroupId = cpiKafkaListenerService.getGroupId();
+        boolean result = cpiKafkaProducerService.sendMessage(flow, clientId, message);
+        future.completeExceptionally(new RuntimeException("Kafka failure"));
 
         // Then
-        assertEquals(expectedGroupId, actualGroupId);
-        verify(topicService).getGroupIdByClientIdAndFlow(sourceSystem, flow);
-    }
-
-    @Test
-    void testProcessEventMessage() {
-        // Given
-        String message = "Sample event message";
-
-        // When
-        cpiKafkaListenerService.processEventMessage(message);
-
-        // Then
-        verify(eventService).processEventMessage(message);
+        assertFalse(result);
+        verify(kafkaCPITemplate).send(topicName, message);
+        // Verify the error logging, if you have a logger and want to check the logs.
     }
 }
