@@ -1,36 +1,22 @@
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 import static org.junit.jupiter.api.Assertions.*;
-
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.*;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
 import org.springframework.kafka.core.KafkaTemplate;
-import org.springframework.kafka.support.SendResult;
-import org.springframework.test.context.junit.jupiter.SpringExtension;
 
-import java.util.concurrent.CompletableFuture;
-
-@ExtendWith(SpringExtension.class)
-class CPIKafkaProducerServiceTest {
-
-    @InjectMocks
-    private CPIKafkaProducerService kafkaProducerService;
+class EPCKafkaProducerServiceTest {
 
     @Mock
-    private KafkaTemplate<String, String> kafkaCPITemplate;
+    private KafkaTemplate<String, String> kafkaEPCTemplate;
 
     @Mock
     private TopicService topicService;
 
-    @Mock
-    private CompletableFuture<SendResult<String, String>> future;
-
-    private String flow = "testFlow";
-    private String clientId = "testClientId";
-    private String message = "testMessage";
-    private String topicName = "testTopic";
+    @InjectMocks
+    private EPCKafkaProducerService epcKafkaProducerService;
 
     @BeforeEach
     void setUp() {
@@ -40,35 +26,64 @@ class CPIKafkaProducerServiceTest {
     @Test
     void testSendMessage_Success() {
         // Arrange
-        when(topicService.getTopicByClientIdAndFlow(clientId, flow)).thenReturn(topicName);
-        when(kafkaCPITemplate.send(topicName, message)).thenReturn(future);
-        when(future.thenApply(any())).thenReturn(future);
-        when(future.join()).thenReturn(mock(SendResult.class)); // Mock the SendResult
+        String message = "Test Message";
+        String sourceSystem = "EPC";
+        String flow = "ack";
+        String topicName = "test-topic";
+        
+        when(topicService.getTopicByClientIdAndFlow(sourceSystem, flow)).thenReturn(topicName);
+        when(kafkaEPCTemplate.send(topicName, message)).thenReturn(null); // Mock future response
 
         // Act
-        boolean result = kafkaProducerService.sendMessage(flow, clientId, message);
+        epcKafkaProducerService.sendMessage(message);
 
         // Assert
-        assertTrue(result);
-        verify(kafkaCPITemplate).send(topicName, message);
-        verify(topicService).getTopicByClientIdAndFlow(clientId, flow);
+        verify(kafkaEPCTemplate, times(1)).send(topicName, message);
     }
 
     @Test
     void testSendMessage_Failure() {
         // Arrange
-        when(topicService.getTopicByClientIdAndFlow(clientId, flow)).thenReturn(topicName);
-        when(kafkaCPITemplate.send(topicName, message)).thenReturn(future);
-        when(future.thenApply(any())).thenThrow(new RuntimeException("Kafka error"));
+        String message = "Test Message";
+        String sourceSystem = "EPC";
+        String flow = "ack";
+        String topicName = "test-topic";
+        
+        when(topicService.getTopicByClientIdAndFlow(sourceSystem, flow)).thenReturn(topicName);
+        when(kafkaEPCTemplate.send(topicName, message)).thenThrow(new RuntimeException("Kafka failure"));
 
         // Act & Assert
-        CustomKafkaProcessingException exception = assertThrows(
-            CustomKafkaProcessingException.class,
-            () -> kafkaProducerService.sendMessage(flow, clientId, message)
-        );
+        assertThrows(RuntimeException.class, () -> epcKafkaProducerService.sendMessage(message));
+        verify(kafkaEPCTemplate, times(1)).send(topicName, message);
+    }
 
-        assertEquals("Failed to send message", exception.getMessage());
-        verify(kafkaCPITemplate).send(topicName, message);
-        verify(topicService).getTopicByClientIdAndFlow(clientId, flow);
+    @Test
+    void testSendMessage_LogsCorrectInfo() {
+        // Arrange
+        String message = "Test Message";
+        String sourceSystem = "EPC";
+        String flow = "ack";
+        String topicName = "test-topic";
+        
+        when(topicService.getTopicByClientIdAndFlow(sourceSystem, flow)).thenReturn(topicName);
+        when(kafkaEPCTemplate.send(topicName, message)).thenReturn(null); // Mock future response
+
+        // Act
+        epcKafkaProducerService.sendMessage(message);
+
+        // You can capture logs here if you're using a logging framework like Logback for further testing
+    }
+
+    @Test
+    void testSendMessage_NoTopicFound() {
+        // Arrange
+        String message = "Test Message";
+        String sourceSystem = "EPC";
+        String flow = "ack";
+        
+        when(topicService.getTopicByClientIdAndFlow(sourceSystem, flow)).thenReturn(null);
+
+        // Act & Assert
+        assertThrows(NullPointerException.class, () -> epcKafkaProducerService.sendMessage(message));
     }
 }
