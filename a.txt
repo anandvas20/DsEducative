@@ -1,22 +1,45 @@
-import static org.mockito.Mockito.*;
-import static org.junit.jupiter.api.Assertions.*;
+package com.vzw.inbound.service;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.vzw.inbound.converter.IConverter;
+import com.vzw.inbound.domain.AckEvent;
+import com.vzw.inbound.domain.Consumer;
+import com.vzw.inbound.domain.Event;
+import com.vzw.inbound.exceptions.DBException;
+import com.vzw.inbound.exceptions.EventProcessingException;
+import com.vzw.inbound.exceptions.KafkaProcessingException;
+import com.vzw.inbound.exceptions.ParsingException;
+import com.vzw.inbound.kafka.EPCKafkaProducerService;
+import com.vzw.inbound.mail.EmailNotificationService;
+import com.vzw.inbound.persistence.entity.EventEntity;
+import com.vzw.inbound.persistence.repository.EventRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.InjectMocks;
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-import org.springframework.kafka.core.KafkaTemplate;
+import org.mockito.*;
 
-class EPCKafkaProducerServiceTest {
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
-    @Mock
-    private KafkaTemplate<String, String> kafkaEPCTemplate;
+class EventServiceTest {
 
     @Mock
-    private TopicService topicService;
+    private ObjectMapper objectMapper;
+
+    @Mock
+    private IConverter<Event, EventEntity> eventConverter;
+
+    @Mock
+    private EventRepository eventRepository;
+
+    @Mock
+    private EPCKafkaProducerService epcKafkaProducerService;
+
+    @Mock
+    private EmailNotificationService emailNotificationService;
 
     @InjectMocks
-    private EPCKafkaProducerService epcKafkaProducerService;
+    private EventService eventService;
 
     @BeforeEach
     void setUp() {
@@ -24,66 +47,134 @@ class EPCKafkaProducerServiceTest {
     }
 
     @Test
-    void testSendMessage_Success() {
-        // Arrange
-        String message = "Test Message";
-        String sourceSystem = "EPC";
-        String flow = "ack";
-        String topicName = "test-topic";
-        
-        when(topicService.getTopicByClientIdAndFlow(sourceSystem, flow)).thenReturn(topicName);
-        when(kafkaEPCTemplate.send(topicName, message)).thenReturn(null); // Mock future response
+    void testProcessEventMessage_Success() throws Exception {
+        String message = "{\"event\":\"test-event\"}";
 
-        // Act
-        epcKafkaProducerService.sendMessage(message);
+        // Mocking dependencies
+        Consumer consumer = new Consumer();
+        Event event = new Event();
+        EventEntity eventEntity = new EventEntity();
+        eventEntity.setEntityName("testEntity");
 
-        // Assert
-        verify(kafkaEPCTemplate, times(1)).send(topicName, message);
+        when(objectMapper.readValue(message, Consumer.class)).thenReturn(consumer);
+        when(eventConverter.convert(event)).thenReturn(eventEntity);
+        consumer.setEvent(event);
+
+        // Execute method
+        eventService.processEventMessage(message);
+
+        // Verify interactions
+        verify(eventRepository).save(eventEntity);
+        verify(epcKafkaProducerService).sendMessage(anyString());
+        verifyNoMoreInteractions(emailNotificationService);
     }
 
     @Test
-    void testSendMessage_Failure() {
-        // Arrange
-        String message = "Test Message";
-        String sourceSystem = "EPC";
-        String flow = "ack";
-        String topicName = "test-topic";
-        
-        when(topicService.getTopicByClientIdAndFlow(sourceSystem, flow)).thenReturn(topicName);
-        when(kafkaEPCTemplate.send(topicName, message)).thenThrow(new RuntimeException("Kafka failure"));
+    void testProcessEventMessage_ParsingException() throws Exception {
+        String message = "{\"event\":\"invalid-event\"}";
 
-        // Act & Assert
-        assertThrows(RuntimeException.class, () -> epcKafkaProducerService.sendMessage(message));
-        verify(kafkaEPCTemplate, times(1)).send(topicName, message);
+        // Mock exception
+        doThrow(JsonProcessingException.class).when(objectMapper).readValue(message, Consumer.class);
+
+        // Execute method and assert
+        Exception exception = assertThrows(ParsingException.class, () -> eventService.processEventMessage(message));
+        assertTrue(exception.getMessage().contains("Failed to parse Kafka message"));
+
+        // Verify email notification
+        verify(emailNotificationService).sendMail(anyString(), eq("MailError"), contains("Failed to parse Kafka message"));
     }
 
     @Test
-    void testSendMessage_LogsCorrectInfo() {
-        // Arrange
-        String message = "Test Message";
-        String sourceSystem = "EPC";
-        String flow = "ack";
-        String topicName = "test-topic";
-        
-        when(topicService.getTopicByClientIdAndFlow(sourceSystem, flow)).thenReturn(topicName);
-        when(kafkaEPCTemplate.send(topicName, message)).thenReturn(null); // Mock future response
+    void testProcessEventMessage_DBException() throws Exception {
+        String message = "{\"event\":\"test-event\"}";
 
-        // Act
-        epcKafkaProducerService.sendMessage(message);
+        // Mocking dependencies
+        Consumer consumer = new Consumer();
+        Event event = new Event();
+        EventEntity eventEntity = new EventEntity();
+        eventEntity.setEntityName("testEntity");
 
-        // You can capture logs here if you're using a logging framework like Logback for further testing
+        when(objectMapper.readValue(message, Consumer.class)).thenReturn(consumer);
+        when(eventConverter.convert(event)).thenReturn(eventEntity);
+        doThrow(new RuntimeException("DB Save Error")).when(eventRepository).save(eventEntity);
+        consumer.setEvent(event);
+
+        // Execute method and assert
+        Exception exception = assertThrows(EventProcessingException.class, () -> eventService.processEventMessage(message));
+        assertTrue(exception.getMessage().contains("Database error"));
+
+        // Verify email notification
+        verify(emailNotificationService).sendMail(anyString(), eq("MailError"), contains("Database error"));
     }
 
     @Test
-    void testSendMessage_NoTopicFound() {
-        // Arrange
-        String message = "Test Message";
-        String sourceSystem = "EPC";
-        String flow = "ack";
-        
-        when(topicService.getTopicByClientIdAndFlow(sourceSystem, flow)).thenReturn(null);
+    void testProcessEventMessage_KafkaProcessingException() throws Exception {
+        String message = "{\"event\":\"test-event\"}";
 
-        // Act & Assert
-        assertThrows(NullPointerException.class, () -> epcKafkaProducerService.sendMessage(message));
+        // Mocking dependencies
+        Consumer consumer = new Consumer();
+        Event event = new Event();
+        EventEntity eventEntity = new EventEntity();
+        eventEntity.setEntityName("testEntity");
+
+        when(objectMapper.readValue(message, Consumer.class)).thenReturn(consumer);
+        when(eventConverter.convert(event)).thenReturn(eventEntity);
+        doThrow(new RuntimeException("Kafka Send Error")).when(epcKafkaProducerService).sendMessage(anyString());
+        consumer.setEvent(event);
+
+        // Execute method and assert
+        Exception exception = assertThrows(EventProcessingException.class, () -> eventService.processEventMessage(message));
+        assertTrue(exception.getMessage().contains("Kafka processing error"));
+
+        // Verify email notification
+        verify(emailNotificationService).sendMail(anyString(), eq("MailError"), contains("Kafka processing error"));
+    }
+
+    @Test
+    void testSaveEntity_Success() {
+        EventEntity eventEntity = new EventEntity();
+        eventEntity.setEntityName("testEntity");
+
+        // Execute method
+        eventService.saveEntity(eventEntity);
+
+        // Verify interaction
+        verify(eventRepository).save(eventEntity);
+    }
+
+    @Test
+    void testSaveEntity_NullEntityName() {
+        EventEntity eventEntity = new EventEntity();
+
+        // Execute method
+        eventService.saveEntity(eventEntity);
+
+        // Verify no save call
+        verify(eventRepository, never()).save(any(EventEntity.class));
+    }
+
+    @Test
+    void testSendACKMessage_Success() throws Exception {
+        Event event = new Event();
+        EventEntity eventEntity = new EventEntity();
+        eventEntity.setEntityName("testEntity");
+
+        // Execute method
+        eventService.sendACKMessage(event, eventEntity);
+
+        // Verify interaction
+        verify(epcKafkaProducerService).sendMessage(anyString());
+    }
+
+    @Test
+    void testSendACKMessage_NullEntityName() throws Exception {
+        Event event = new Event();
+        EventEntity eventEntity = new EventEntity();
+
+        // Execute method
+        eventService.sendACKMessage(event, eventEntity);
+
+        // Verify no Kafka interaction
+        verify(epcKafkaProducerService, never()).sendMessage(anyString());
     }
 }
