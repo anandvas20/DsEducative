@@ -1,180 +1,25 @@
-package com.vzw.inbound.service;
+<Configuration status="warn" name="fcinboundms" packages="">
+    <Appenders>
+        <!-- Console Appender -->
+        <Console name="Console1" target="SYSTEM_OUT">
+            <PatternLayout>
+                <MarkerPatternSelector defaultPattern="%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level %logger{36} - %msg%n">
+                    <PatternMatch key="DOMAIN_SERVICES_EVENT" pattern="%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level %logger{36} - %msg%n" />
+                </MarkerPatternSelector>
+            </PatternLayout>
+        </Console>
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.vzw.inbound.converter.IConverter;
-import com.vzw.inbound.domain.AckEvent;
-import com.vzw.inbound.domain.Consumer;
-import com.vzw.inbound.domain.Event;
-import com.vzw.inbound.exceptions.DBException;
-import com.vzw.inbound.exceptions.EventProcessingException;
-import com.vzw.inbound.exceptions.KafkaProcessingException;
-import com.vzw.inbound.exceptions.ParsingException;
-import com.vzw.inbound.kafka.EPCKafkaProducerService;
-import com.vzw.inbound.mail.EmailNotificationService;
-import com.vzw.inbound.persistence.entity.EventEntity;
-import com.vzw.inbound.persistence.repository.EventRepository;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.mockito.*;
+        <!-- Console Appender with Marker -->
+        <Console name="ConsoleAppenderWithMarker" target="SYSTEM_OUT">
+            <MarkerFilter marker="APP_FLOW_TRACING" onMatch="ACCEPT" onMismatch="DENY" />
+            <PatternLayout pattern="{ &quot;msg&quot;: &quot;%msg&quot;, &quot;logPayload&quot;: false, &quot;application&quot;: &quot;/epc-oracleupdater&quot;, &quot;app_name&quot;: &quot;/epc-oracleupdater&quot;, &quot;event_type&quot;: &quot;request&quot;, &quot;log_type&quot;: &quot;Payload&quot;, &quot;VSAD_ID&quot;: &quot;110V&quot;, &quot;type&quot;: &quot;request&quot;, &quot;timestamp&quot;: &quot;%d{yyyy-MM-dd HH:mm:ss.SSS}&quot;, &quot;Thread&quot;: &quot;%t&quot;, &quot;Level&quot;: &quot;%level&quot;, &quot;page_name&quot;: &quot;%logger{36}&quot;, &quot;function_name&quot;: &quot;api_response&quot; }" />
+        </Console>
+    </Appenders>
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
-
-class EventServiceTest {
-
-    @Mock
-    private ObjectMapper objectMapper;
-
-    @Mock
-    private IConverter<Event, EventEntity> eventConverter;
-
-    @Mock
-    private EventRepository eventRepository;
-
-    @Mock
-    private EPCKafkaProducerService epcKafkaProducerService;
-
-    @Mock
-    private EmailNotificationService emailNotificationService;
-
-    @InjectMocks
-    private EventService eventService;
-
-    @BeforeEach
-    void setUp() {
-        MockitoAnnotations.openMocks(this);
-    }
-
-    @Test
-    void testProcessEventMessage_Success() throws Exception {
-        String message = "{\"event\":\"test-event\"}";
-
-        // Mocking dependencies
-        Consumer consumer = new Consumer();
-        Event event = new Event();
-        EventEntity eventEntity = new EventEntity();
-        eventEntity.setEntityName("testEntity");
-
-        when(objectMapper.readValue(message, Consumer.class)).thenReturn(consumer);
-        when(eventConverter.convert(event)).thenReturn(eventEntity);
-        consumer.setEvent(event);
-
-        // Execute method
-        eventService.processEventMessage(message);
-
-        // Verify interactions
-        verify(eventRepository).save(eventEntity);
-        verify(epcKafkaProducerService).sendMessage(anyString());
-        verifyNoMoreInteractions(emailNotificationService);
-    }
-
-    @Test
-    void testProcessEventMessage_ParsingException() throws Exception {
-        String message = "{\"event\":\"invalid-event\"}";
-
-        // Mock exception
-        doThrow(JsonProcessingException.class).when(objectMapper).readValue(message, Consumer.class);
-
-        // Execute method and assert
-        Exception exception = assertThrows(ParsingException.class, () -> eventService.processEventMessage(message));
-        assertTrue(exception.getMessage().contains("Failed to parse Kafka message"));
-
-        // Verify email notification
-        verify(emailNotificationService).sendMail(anyString(), eq("MailError"), contains("Failed to parse Kafka message"));
-    }
-
-    @Test
-    void testProcessEventMessage_DBException() throws Exception {
-        String message = "{\"event\":\"test-event\"}";
-
-        // Mocking dependencies
-        Consumer consumer = new Consumer();
-        Event event = new Event();
-        EventEntity eventEntity = new EventEntity();
-        eventEntity.setEntityName("testEntity");
-
-        when(objectMapper.readValue(message, Consumer.class)).thenReturn(consumer);
-        when(eventConverter.convert(event)).thenReturn(eventEntity);
-        doThrow(new RuntimeException("DB Save Error")).when(eventRepository).save(eventEntity);
-        consumer.setEvent(event);
-
-        // Execute method and assert
-        Exception exception = assertThrows(EventProcessingException.class, () -> eventService.processEventMessage(message));
-        assertTrue(exception.getMessage().contains("Database error"));
-
-        // Verify email notification
-        verify(emailNotificationService).sendMail(anyString(), eq("MailError"), contains("Database error"));
-    }
-
-    @Test
-    void testProcessEventMessage_KafkaProcessingException() throws Exception {
-        String message = "{\"event\":\"test-event\"}";
-
-        // Mocking dependencies
-        Consumer consumer = new Consumer();
-        Event event = new Event();
-        EventEntity eventEntity = new EventEntity();
-        eventEntity.setEntityName("testEntity");
-
-        when(objectMapper.readValue(message, Consumer.class)).thenReturn(consumer);
-        when(eventConverter.convert(event)).thenReturn(eventEntity);
-        doThrow(new RuntimeException("Kafka Send Error")).when(epcKafkaProducerService).sendMessage(anyString());
-        consumer.setEvent(event);
-
-        // Execute method and assert
-        Exception exception = assertThrows(EventProcessingException.class, () -> eventService.processEventMessage(message));
-        assertTrue(exception.getMessage().contains("Kafka processing error"));
-
-        // Verify email notification
-        verify(emailNotificationService).sendMail(anyString(), eq("MailError"), contains("Kafka processing error"));
-    }
-
-    @Test
-    void testSaveEntity_Success() {
-        EventEntity eventEntity = new EventEntity();
-        eventEntity.setEntityName("testEntity");
-
-        // Execute method
-        eventService.saveEntity(eventEntity);
-
-        // Verify interaction
-        verify(eventRepository).save(eventEntity);
-    }
-
-    @Test
-    void testSaveEntity_NullEntityName() {
-        EventEntity eventEntity = new EventEntity();
-
-        // Execute method
-        eventService.saveEntity(eventEntity);
-
-        // Verify no save call
-        verify(eventRepository, never()).save(any(EventEntity.class));
-    }
-
-    @Test
-    void testSendACKMessage_Success() throws Exception {
-        Event event = new Event();
-        EventEntity eventEntity = new EventEntity();
-        eventEntity.setEntityName("testEntity");
-
-        // Execute method
-        eventService.sendACKMessage(event, eventEntity);
-
-        // Verify interaction
-        verify(epcKafkaProducerService).sendMessage(anyString());
-    }
-
-    @Test
-    void testSendACKMessage_NullEntityName() throws Exception {
-        Event event = new Event();
-        EventEntity eventEntity = new EventEntity();
-
-        // Execute method
-        eventService.sendACKMessage(event, eventEntity);
-
-        // Verify no Kafka interaction
-        verify(epcKafkaProducerService, never()).sendMessage(anyString());
-    }
-}
+    <Loggers>
+        <Root level="INFO">
+            <AppenderRef ref="Console1" />
+            <AppenderRef ref="ConsoleAppenderWithMarker" />
+        </Root>
+    </Loggers>
+</Configuration>
