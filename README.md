@@ -138,3 +138,31 @@ public class ProductOfferingCharacteristicValue {
         }
     }
 }
+
+
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+
+public class DateUtil {
+
+    public static String convertToMMDDYYYY(String isoDateString) {
+        // Trim fractional seconds if they are more than 6 digits
+        if (isoDateString.contains(".")) {
+            isoDateString = isoDateString.replaceAll("(\\.\\d{1,9})\\d*$", "$1"); // limit to 9 digits
+        }
+
+        // Parse input
+        DateTimeFormatter inputFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSSS");
+        LocalDateTime dateTime = LocalDateTime.parse(isoDateString, inputFormatter);
+
+        // Output formatter
+        DateTimeFormatter outputFormatter = DateTimeFormatter.ofPattern("MM/dd/yyyy");
+        return dateTime.format(outputFormatter);
+    }
+
+    public static void main(String[] args) {
+        String input = "2024-09-05T00:57:20.0000000";
+        String formattedDate = convertToMMDDYYYY(input);
+        System.out.println("Formatted Date: " + formattedDate);
+    }
+}
