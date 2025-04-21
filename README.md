@@ -1,72 +1,89 @@
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
-import java.util.Date;
+package com.qurateretail.customer360.service;
 
-public class DateFormatUtils {
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.qurateretail.customer360.dto.RedisAccessoryDto;
+import com.qurateretail.customer360.dto.RedisDeviceDto;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import org.springframework.data.redis.core.ReactiveRedisTemplate;
+import org.springframework.data.redis.core.ReactiveValueOperations;
+import org.springframework.data.redis.core.ScanOptions;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.test.StepVerifier;
 
-    public static String convertToMMDDYYYY(String inputDate) {
-        // Possible input date formats
-        String[] inputFormats = new String[]{
-            "dd-MMM-yy hh.mm.ss.SSSSSSS a",
-            "yyyy-MM-dd HH:mm:ss.S",
-            "yyyy-MM-dd'T'HH:mm:ss.SSSSSSS",
-            "yyyy-MM-dd'T'HH:mm:ss.S",
-            "yyyy-MM-dd'T'HH:mm:ss",
-            "yyyy-MM-dd'T'HH:mm:ss'Z'"
-        };
+import java.util.List;
 
-        SimpleDateFormat outputFormat = new SimpleDateFormat("MM/dd/yyyy");
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
 
-        for (String format : inputFormats) {
-            try {
-                SimpleDateFormat inputFormat = new SimpleDateFormat(format);
-                inputFormat.setLenient(false);
-                Date date = inputFormat.parse(inputDate);
-                return outputFormat.format(date);
-            } catch (ParseException e) {
-                // Try the next format
-            }
-        }
+public class RedisServiceTest {
 
-        // If none of the formats matched
-        return "Invalid date";
+    private RedisService redisService;
+    private ReactiveRedisTemplate<String, String> redisTemplate;
+    private ReactiveValueOperations<String, String> valueOperations;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @BeforeEach
+    void setUp() {
+        redisTemplate = Mockito.mock(ReactiveRedisTemplate.class);
+        valueOperations = Mockito.mock(ReactiveValueOperations.class);
+        when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+
+        redisService = new RedisService(redisTemplate);
+        redisService.redisKeyPrefix = "customer:";
+        redisService.init();
     }
-}
 
+    @Test
+    void testGetAllKeysAndValues_success() throws Exception {
+        String key = "customer:123";
+        RedisDeviceDto dto = new RedisDeviceDto();
+        dto.setDeviceId("123");
+        dto.setAccessories(List.of(new RedisAccessoryDto()));
+        String json = objectMapper.writeValueAsString(dto);
 
-import java.time.*;
-import java.time.format.DateTimeFormatter;
-import java.time.format.DateTimeParseException;
-import java.util.*;
+        when(redisTemplate.scan(any(ScanOptions.class))).thenReturn(Flux.just(key));
+        when(valueOperations.get(key)).thenReturn(Mono.just(json));
 
-public class DateFormatUtils {
+        StepVerifier.create(redisService.getAllKeysAndValues())
+                .expectNextMatches(result -> result.getDeviceId().equals("123"))
+                .verifyComplete();
+    }
 
-    public static String convertToMMDDYYYY(String inputDate) {
-        // Output format
-        DateTimeFormatter outputFormatter = DateTimeFormatter.ofPattern("MM/dd/yyyy");
+    @Test
+    void testGetAllAccessories_success() throws Exception {
+        String key = "customer:456";
+        RedisAccessoryDto accessory = new RedisAccessoryDto();
+        RedisDeviceDto dto = new RedisDeviceDto();
+        dto.setDeviceId("456");
+        dto.setAccessories(List.of(accessory));
+        String json = objectMapper.writeValueAsString(dto);
 
-        // List of possible input formatters
-        List<DateTimeFormatter> inputFormatters = Arrays.asList(
-            DateTimeFormatter.ofPattern("dd-MMM-yy hh.mm.ss.SSSSSSS a", Locale.ENGLISH),
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.S"),
-            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSSS"),
-            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSS"),
-            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS"),
-            DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss"),
-            DateTimeFormatter.ISO_OFFSET_DATE_TIME,
-            DateTimeFormatter.ISO_INSTANT
-        );
+        when(redisTemplate.scan(any(ScanOptions.class))).thenReturn(Flux.just(key));
+        when(valueOperations.get(key)).thenReturn(Mono.just(json));
 
-        for (DateTimeFormatter formatter : inputFormatters) {
-            try {
-                TemporalAccessor parsed = formatter.parse(inputDate);
-                LocalDate date = LocalDate.from(parsed);
-                return outputFormatter.format(date);
-            } catch (DateTimeParseException e) {
-                // Continue trying next format
-            }
-        }
+        StepVerifier.create(redisService.getAllAccessories("456"))
+                .expectNextMatches(list -> list.size() == 1)
+                .verifyComplete();
+    }
 
-        return "Invalid date";
+    @Test
+    void testGetAllAccessories_deviceIdMissing() {
+        StepVerifier.create(redisService.getAllAccessories(""))
+                .expectError(IllegalArgumentException.class)
+                .verify();
+    }
+
+    @Test
+    void testGetAllAccessories_notFound() throws Exception {
+        when(redisTemplate.scan(any(ScanOptions.class))).thenReturn(Flux.empty());
+
+        StepVerifier.create(redisService.getAllAccessories("999"))
+                .expectErrorMatches(e -> e instanceof RuntimeException &&
+                        e.getMessage().contains("No data found for deviceId"))
+                .verify();
     }
 }
