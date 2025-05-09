@@ -1,40 +1,42 @@
-@WebFluxTest(RedisService.class)
-class RedisServiceTest {
+import static org.junit.jupiter.api.Assertions.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
 
-    @Autowired
-    private RedisService redisService;
+import java.util.HashMap;
+import java.util.Map;
 
-    @MockBean
-    private RedisService redisServiceMock;
+public class RedisAccessoryMapperTest {
 
     @Test
-    void testGetRedisData() {
-        // Given
-        String world = "Earth";
-        String productType = "Gadget";
-        String env = "prod";
+    public void testMapToRedisAccessoryDto_validJson_shouldReturnDto() throws Exception {
+        Map<String, String> concatenatedMap = new HashMap<>();
 
-        List<String> mockJsonList = List.of(
-            "{\"key1\":\"value1\"}",
-            "{\"key2\":\"value2\"}"
-        );
+        // Sample JSON structures
+        String dataJson = "{ \"sku\": \"12345\", \"name\": \"Test Product\" }";
+        String responseJson = "{ " +
+                "\"PRICE\": { \"value\": \"19.99\" }, " +
+                "\"IMAGE_URL_MAP\": { \"main\": \"http://image.url/main.jpg\" }, " +
+                "\"category\": \"accessory\" }";
 
-        Mockito.when(redisServiceMock.retrieveRedisData(world, productType, env, ""))
-                .thenReturn(Mono.just(mockJsonList));
+        concatenatedMap.put("DATA", dataJson);
+        concatenatedMap.put("RESPONSE", responseJson);
 
-        // When
-        Mono<Object> resultMono = redisServiceMock.getRedisData(world, productType, env);
+        RedisAccessoryDto result = RedisAccessoryMapper.mapToRedisAccessoryDto(concatenatedMap);
 
-        // Then
-        StepVerifier.create(resultMono)
-            .expectNextMatches(result -> {
-                if (result instanceof List<?> list) {
-                    return list.size() == 2 &&
-                           list.get(0) instanceof Map &&
-                           ((Map<?, ?>) list.get(0)).get("key1").equals("value1");
-                }
-                return false;
-            })
-            .verifyComplete();
+        assertNotNull(result);
+        assertEquals("http://image.url/main.jpg", result.getImageUrlMap());
+        // Add more assertions depending on how populate methods work
+    }
+
+    @Test
+    public void testMapToRedisAccessoryDto_nullDataOrResponse_shouldReturnEmptyDto() throws Exception {
+        Map<String, String> concatenatedMap = new HashMap<>();
+        concatenatedMap.put("DATA", null);
+        concatenatedMap.put("RESPONSE", null);
+
+        RedisAccessoryDto result = RedisAccessoryMapper.mapToRedisAccessoryDto(concatenatedMap);
+
+        assertNotNull(result);
+        assertNull(result.getImageUrlMap()); // assuming default is null
     }
 }
