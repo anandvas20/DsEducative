@@ -1,44 +1,53 @@
-String dataJson = """
-{
-  "sku": "SKU12345",
-  "name": "Bluetooth Speaker",
-  "active": true,
-  "stock": 150,
-  "tags": ["audio", "portable", "bluetooth"],
-  "specs": {
-    "color": "black",
-    "batteryLife": "10h"
-  },
-  "rating": null
-}
-""";
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
 
-String responseJson = """
-{
-  "PRICE": {
-    "value": 29.99,
-    "currency": "USD",
-    "discount": {
-      "amount": 5,
-      "percentage": 14.3
+import java.lang.reflect.Method;
+import java.util.*;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+class RedisUtilTest {
+
+    public static class RedisDeviceDto {
+        public String name;
+        public boolean active;
+        public int count;
+        public double price;
+        public long timestamp;
+        public List<String> tags;
     }
-  },
-  "IMAGE_URL_MAP": {
-    "main": "https://example.com/images/main.jpg",
-    "thumbnail": "https://example.com/images/thumb.jpg",
-    "gallery": [
-      "https://example.com/images/1.jpg",
-      "https://example.com/images/2.jpg"
-    ]
-  },
-  "description": "High-quality portable Bluetooth speaker.",
-  "available": true,
-  "releaseDate": "2024-12-01",
-  "dimensions": {
-    "width": 10.5,
-    "height": 4.0,
-    "depth": 3.0
-  },
-  "extraAttributes": null
+
+    @Test
+    void testPrivatePopulateRedisDto() throws Exception {
+        String json = """
+            {
+              "name": "DeviceA",
+              "active": true,
+              "count": 5,
+              "price": 199.99,
+              "timestamp": 1650000000000,
+              "tags": ["sensor", "wifi"]
+            }
+        """;
+
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode rootNode = mapper.readTree(json);
+        Iterator<Map.Entry<String, JsonNode>> fields = rootNode.fields();
+
+        RedisDeviceDto dto = new RedisDeviceDto();
+
+        // Access private static method via reflection
+        Method method = YourClassName.class.getDeclaredMethod("populateRedisDto", RedisDeviceDto.class, Iterator.class);
+        method.setAccessible(true);
+        method.invoke(null, dto, fields); // null because it's a static method
+
+        // Assertions
+        assertEquals("DeviceA", dto.name);
+        assertTrue(dto.active);
+        assertEquals(5, dto.count);
+        assertEquals(199.99, dto.price);
+        assertEquals(1650000000000L, dto.timestamp);
+        assertEquals(List.of("sensor", "wifi"), dto.tags);
+    }
 }
-""";
