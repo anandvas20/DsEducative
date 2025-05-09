@@ -1,53 +1,49 @@
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
-
 import java.lang.reflect.Method;
-import java.util.*;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-class RedisUtilTest {
-
-    public static class RedisDeviceDto {
-        public String name;
-        public boolean active;
-        public int count;
-        public double price;
-        public long timestamp;
-        public List<String> tags;
-    }
+class RedisServiceTest {
 
     @Test
-    void testPrivatePopulateRedisDto() throws Exception {
-        String json = """
-            {
-              "name": "DeviceA",
-              "active": true,
-              "count": 5,
-              "price": 199.99,
-              "timestamp": 1650000000000,
-              "tags": ["sensor", "wifi"]
-            }
-        """;
+    void testGetRedisAccessoryMappedJson_privateMethod() throws Exception {
+        // Setup
+        RedisService service = new RedisService();
 
-        ObjectMapper mapper = new ObjectMapper();
-        JsonNode rootNode = mapper.readTree(json);
-        Iterator<Map.Entry<String, JsonNode>> fields = rootNode.fields();
+        RedisAccessoryDto dto = new RedisAccessoryDto();
+        // You may need to set values in dto based on your actual CommonUtil.getPropertiesMap logic
 
-        RedisDeviceDto dto = new RedisDeviceDto();
+        // Mock static method CommonUtil.getPropertiesMap(dto)
+        Map<String, String> dtoProps = new HashMap<>();
+        dtoProps.put("productId", "123");
+        dtoProps.put("type", "accessory");
 
-        // Access private static method via reflection
-        Method method = YourClassName.class.getDeclaredMethod("populateRedisDto", RedisDeviceDto.class, Iterator.class);
-        method.setAccessible(true);
-        method.invoke(null, dto, fields); // null because it's a static method
+        try (MockedStatic<CommonUtil> mocked = Mockito.mockStatic(CommonUtil.class)) {
+            mocked.when(() -> CommonUtil.getPropertiesMap(dto)).thenReturn(dtoProps);
 
-        // Assertions
-        assertEquals("DeviceA", dto.name);
-        assertTrue(dto.active);
-        assertEquals(5, dto.count);
-        assertEquals(199.99, dto.price);
-        assertEquals(1650000000000L, dto.timestamp);
-        assertEquals(List.of("sensor", "wifi"), dto.tags);
+            // Inject mock runTimeMapInitializer
+            RunTimeMapInitializer initializer = Mockito.mock(RunTimeMapInitializer.class);
+            Map<String, String> map = new HashMap<>();
+            map.put("id", "productId");
+            map.put("category", "type");
+            Mockito.when(initializer.getCacheMap("electronics")).thenReturn(map);
+
+            // Use reflection to set the mock into the private field if needed
+            Field field = RedisService.class.getDeclaredField("runTimeMapInitializer");
+            field.setAccessible(true);
+            field.set(service, initializer);
+
+            // Reflectively invoke private method
+            Method method = RedisService.class.getDeclaredMethod("getRedisAccessoryMappedJson", RedisAccessoryDto.class, String.class);
+            method.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            Map<String, String> result = (Map<String, String>) method.invoke(service, dto, "electronics");
+
+            // Assertions
+            assertEquals("123", result.get("id"));
+            assertEquals("accessory", result.get("category"));
+        }
     }
 }
