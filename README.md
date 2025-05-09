@@ -1,42 +1,44 @@
-import static org.junit.jupiter.api.Assertions.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import org.junit.jupiter.api.Test;
-
-import java.util.HashMap;
-import java.util.Map;
-
-public class RedisAccessoryMapperTest {
-
-    @Test
-    public void testMapToRedisAccessoryDto_validJson_shouldReturnDto() throws Exception {
-        Map<String, String> concatenatedMap = new HashMap<>();
-
-        // Sample JSON structures
-        String dataJson = "{ \"sku\": \"12345\", \"name\": \"Test Product\" }";
-        String responseJson = "{ " +
-                "\"PRICE\": { \"value\": \"19.99\" }, " +
-                "\"IMAGE_URL_MAP\": { \"main\": \"http://image.url/main.jpg\" }, " +
-                "\"category\": \"accessory\" }";
-
-        concatenatedMap.put("DATA", dataJson);
-        concatenatedMap.put("RESPONSE", responseJson);
-
-        RedisAccessoryDto result = RedisAccessoryMapper.mapToRedisAccessoryDto(concatenatedMap);
-
-        assertNotNull(result);
-        assertEquals("http://image.url/main.jpg", result.getImageUrlMap());
-        // Add more assertions depending on how populate methods work
-    }
-
-    @Test
-    public void testMapToRedisAccessoryDto_nullDataOrResponse_shouldReturnEmptyDto() throws Exception {
-        Map<String, String> concatenatedMap = new HashMap<>();
-        concatenatedMap.put("DATA", null);
-        concatenatedMap.put("RESPONSE", null);
-
-        RedisAccessoryDto result = RedisAccessoryMapper.mapToRedisAccessoryDto(concatenatedMap);
-
-        assertNotNull(result);
-        assertNull(result.getImageUrlMap()); // assuming default is null
-    }
+String dataJson = """
+{
+  "sku": "SKU12345",
+  "name": "Bluetooth Speaker",
+  "active": true,
+  "stock": 150,
+  "tags": ["audio", "portable", "bluetooth"],
+  "specs": {
+    "color": "black",
+    "batteryLife": "10h"
+  },
+  "rating": null
 }
+""";
+
+String responseJson = """
+{
+  "PRICE": {
+    "value": 29.99,
+    "currency": "USD",
+    "discount": {
+      "amount": 5,
+      "percentage": 14.3
+    }
+  },
+  "IMAGE_URL_MAP": {
+    "main": "https://example.com/images/main.jpg",
+    "thumbnail": "https://example.com/images/thumb.jpg",
+    "gallery": [
+      "https://example.com/images/1.jpg",
+      "https://example.com/images/2.jpg"
+    ]
+  },
+  "description": "High-quality portable Bluetooth speaker.",
+  "available": true,
+  "releaseDate": "2024-12-01",
+  "dimensions": {
+    "width": 10.5,
+    "height": 4.0,
+    "depth": 3.0
+  },
+  "extraAttributes": null
+}
+""";
