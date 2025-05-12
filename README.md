@@ -1,61 +1,60 @@
-import org.junit.jupiter.api.Test;
-import org.springframework.data.redis.serializer.StringRedisSerializer;
+@ExtendWith(MockitoExtension.class)
+class TokenServiceTest {
 
-import java.io.ByteArrayOutputStream;
-import java.io.IOException;
-import java.util.zip.GZIPOutputStream;
+    @InjectMocks
+    private TokenService tokenService; // The class containing getTokenHttpService()
 
-import static org.assertj.core.api.Assertions.assertThat;
+    @Mock
+    private EpcProperties epcProperties;
 
-public class GzipStringRedisSerializerTest {
+    @Mock
+    private HttpService tokenGenerator;
 
-    private final String original = "Test string";
+    @MockStatic(JsonToObjectConverter.class)
+    private MockedStatic<JsonToObjectConverter> jsonConverterMock;
 
-    @Test
-    void testDeserialize_withGzipEnabled_andCompressedBytes() throws IOException {
-        GzipStringRedisSerializer serializer = new GzipStringRedisSerializer(true);
-        byte[] compressed = compress(original);
-        String result = serializer.deserialize(compressed);
-        assertThat(result).isEqualTo(original);
+    private TokenModel tokenModel;
+
+    @BeforeEach
+    void setup() {
+        tokenModel = new TokenModel();
+        tokenModel.setRoles(List.of("ROLE_USER"));
+        tokenModel.setSub("user@example.com");
+
+        jsonConverterMock = Mockito.mockStatic(JsonToObjectConverter.class);
+        jsonConverterMock.when(() ->
+            JsonToObjectConverter.jsonToObject("token.json", TokenModel.class)
+        ).thenReturn(tokenModel);
+    }
+
+    @AfterEach
+    void tearDown() {
+        jsonConverterMock.close();
     }
 
     @Test
-    void testDeserialize_withGzipDisabled_shouldReturnSameString() {
-        GzipStringRedisSerializer serializer = new GzipStringRedisSerializer(false);
-        byte[] plain = new StringRedisSerializer().serialize(original);
-        String result = serializer.deserialize(plain);
-        assertThat(result).isEqualTo(original);
+    void testSuccessfulFlowWithAuth() {
+        // Setup mocks
+        EpcProperties.Token token = mock(EpcProperties.Token.class);
+        when(token.getUserRoles()).thenReturn(List.of("ROLE_USER"));
+        when(token.getSub()).thenReturn("user@example.com");
+        when(epcProperties.getToken()).thenReturn(token);
+        when(epcProperties.getUsername()).thenReturn("user");
+        when(epcProperties.getPassword()).thenReturn("pass");
+
+        String tokenJson = "{\"access_token\":\"abc\"}";
+        when(tokenGenerator.postRequest(any(), any(), any())).thenReturn(Mono.just(tokenJson));
+
+        // Run and verify
+        StepVerifier.create(tokenService.getTokenHttpService())
+            .expectNextMatches(token -> token.getAccessToken().equals("abc"))
+            .verifyComplete();
     }
 
     @Test
-    void testDeserialize_nullBytes_shouldReturnNull() {
-        GzipStringRedisSerializer serializer = new GzipStringRedisSerializer(true);
-        String result = serializer.deserialize(null);
-        assertThat(result).isNull();
+    void testSuccessfulFlowWithoutAuth() {
+        // Same as above but epcProperties.getUsername() and getPassword() return null
     }
 
     @Test
-    void testDeserialize_emptyBytes_shouldReturnNull() {
-        GzipStringRedisSerializer serializer = new GzipStringRedisSerializer(true);
-        String result = serializer.deserialize(new byte[0]);
-        assertThat(result).isNull();
-    }
-
-    @Test
-    void testDeserialize_withInvalidGzip_shouldReturnNull() {
-        GzipStringRedisSerializer serializer = new GzipStringRedisSerializer(true);
-        // Pass non-GZIP bytes that start with GZIP magic number to force exception
-        byte[] invalidGzip = new byte[]{0x1f, 0x8b, 0x00, 0x00};
-        String result = serializer.deserialize(invalidGzip);
-        assertThat(result).isNull();
-    }
-
-    // Utility method to compress a string using GZIP
-    private byte[] compress(String str) throws IOException {
-        ByteArrayOutputStream baos = new ByteArrayOutputStream();
-        try (GZIPOutputStream gzip = new GZIPOutputStream(baos)) {
-            gzip.write(str.getBytes());
-        }
-        return baos.toByteArray();
-    }
-}
+    void
