@@ -1,44 +1,61 @@
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.data.redis.serializer.StringRedisSerializer;
 
-import java.lang.reflect.Method;
-import java.util.*;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.util.zip.GZIPOutputStream;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.assertj.core.api.Assertions.assertThat;
 
-public class DataFlowServicePrivateMethodTest {
+public class GzipStringRedisSerializerTest {
 
-    private DataFlowService service;
-    private DataFlow mockDataFlow;
+    private final String original = "Test string";
 
-    @BeforeEach
-    void setup() {
-        service = new DataFlowService();
-        mockDataFlow = mock(DataFlow.class);
-        service.setDataFlow(mockDataFlow);
+    @Test
+    void testDeserialize_withGzipEnabled_andCompressedBytes() throws IOException {
+        GzipStringRedisSerializer serializer = new GzipStringRedisSerializer(true);
+        byte[] compressed = compress(original);
+        String result = serializer.deserialize(compressed);
+        assertThat(result).isEqualTo(original);
     }
 
     @Test
-    void testPrivateGetEntityDetailsViaReflection() throws Exception {
-        List<EntityRecord> data = Arrays.asList(
-            new EntityRecord("Field1", "Sys1", "Val1"),
-            new EntityRecord("Field1", "Sys2", "Val2")
-        );
-        when(mockDataFlow.getSystemsInOrder()).thenReturn(Arrays.asList("Sys1", "Sys2"));
+    void testDeserialize_withGzipDisabled_shouldReturnSameString() {
+        GzipStringRedisSerializer serializer = new GzipStringRedisSerializer(false);
+        byte[] plain = new StringRedisSerializer().serialize(original);
+        String result = serializer.deserialize(plain);
+        assertThat(result).isEqualTo(original);
+    }
 
-        Method method = DataFlowService.class.getDeclaredMethod("getEntityDetails", List.class);
-        method.setAccessible(true); // access private method
+    @Test
+    void testDeserialize_nullBytes_shouldReturnNull() {
+        GzipStringRedisSerializer serializer = new GzipStringRedisSerializer(true);
+        String result = serializer.deserialize(null);
+        assertThat(result).isNull();
+    }
 
-        EntityDetails result = (EntityDetails) method.invoke(service, data);
+    @Test
+    void testDeserialize_emptyBytes_shouldReturnNull() {
+        GzipStringRedisSerializer serializer = new GzipStringRedisSerializer(true);
+        String result = serializer.deserialize(new byte[0]);
+        assertThat(result).isNull();
+    }
 
-        assertNotNull(result);
-        assertEquals(1, result.getEntityRowDetails().size());
+    @Test
+    void testDeserialize_withInvalidGzip_shouldReturnNull() {
+        GzipStringRedisSerializer serializer = new GzipStringRedisSerializer(true);
+        // Pass non-GZIP bytes that start with GZIP magic number to force exception
+        byte[] invalidGzip = new byte[]{0x1f, 0x8b, 0x00, 0x00};
+        String result = serializer.deserialize(invalidGzip);
+        assertThat(result).isNull();
+    }
 
-        EntityRowDetails row = result.getEntityRowDetails().get(0);
-        assertEquals("Field1", row.getField());
-        assertEquals("Val1", row.getDetails().get("Sys1"));
-        assertEquals("Val2", row.getDetails().get("Sys2"));
-        assertFalse(row.isMatch());
+    // Utility method to compress a string using GZIP
+    private byte[] compress(String str) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(baos)) {
+            gzip.write(str.getBytes());
+        }
+        return baos.toByteArray();
     }
 }
