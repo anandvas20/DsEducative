@@ -1,15 +1,3 @@
-<Configuration status="warn" name="fcinboundms" packages="">
-    <Appenders>
-        <!-- Console Appender -->
-        <Console name="Console1" target="SYSTEM_OUT">
-            <PatternLayout>
-                <MarkerPatternSelector defaultPattern="%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level %logger{36} - %msg%n">
-                    <PatternMatch key="DOMAIN_SERVICES_EVENT" pattern="%d{yyyy-MM-dd HH:mm:ss} [%t] %-5level %logger{36} - %msg%n" />
-                </MarkerPatternSelector>
-            </PatternLayout>
-        </Console>
 
-        <!-- Console Appender with Marker -->
-        <Console name="ConsoleAppenderWithMarker" target="SYSTEM_OUT">
-            <MarkerFilter marker="APP_FLOW_TRACING" onMatch="ACCEPT" onMismatch="DENY" />
-            <PatternLayout pattern="{ &quot;msg&quot;: &quot;%msg&quot;, &quot;logPayload&quot;: false, &quot;application&quot;: &quot;/epc-oracleupdater&quot;, &quot;app_name&quot;: &quot;/epc-oracleupdater&quot;, &quot;event_type&quot;: &quot;request&quot;, &
+
+ hello baby
