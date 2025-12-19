@@ -12,14 +12,4 @@
         <!-- Console Appender with Marker -->
         <Console name="ConsoleAppenderWithMarker" target="SYSTEM_OUT">
             <MarkerFilter marker="APP_FLOW_TRACING" onMatch="ACCEPT" onMismatch="DENY" />
-            <PatternLayout pattern="{ &quot;msg&quot;: &quot;%msg&quot;, &quot;logPayload&quot;: false, &quot;application&quot;: &quot;/epc-oracleupdater&quot;, &quot;app_name&quot;: &quot;/epc-oracleupdater&quot;, &quot;event_type&quot;: &quot;request&quot;, &quot;log_type&quot;: &quot;Payload&quot;, &quot;VSAD_ID&quot;: &quot;110V&quot;, &quot;type&quot;: &quot;request&quot;, &quot;timestamp&quot;: &quot;%d{yyyy-MM-dd HH:mm:ss.SSS}&quot;, &quot;Thread&quot;: &quot;%t&quot;, &quot;Level&quot;: &quot;%level&quot;, &quot;page_name&quot;: &quot;%logger{36}&quot;, &quot;function_name&quot;: &quot;api_response&quot; }" />
-        </Console>
-    </Appenders>
-
-    <Loggers>
-        <Root level="INFO">
-            <AppenderRef ref="Console1" />
-            <AppenderRef ref="ConsoleAppenderWithMarker" />
-        </Root>
-    </Loggers>
-</Configuration>
+            <PatternLayout pattern="{ &quot;msg&quot;: &quot;%msg&quot;, &quot;logPayload&quot;: false, &quot;application&quot;: &quot;/epc-oracleupdater&quot;, &quot;app_name&quot;: &quot;/epc-oracleupdater&quot;, &quot;event_type&quot;: &quot;request&quot;, &
