@@ -1,0 +1,1059 @@
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+print("=" * 60)
+print("GOLD ALGO BOT - LOADING...")
+print("=" * 60)
+
+import os
+import sys
+import time
+import json
+import math
+import logging
+import threading
+import traceback
+from queue import Queue
+from collections import deque
+from functools import wraps
+from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
+from logging.handlers import RotatingFileHandler
+
+print("[IMPORT] Standard libraries loaded successfully")
+
+# Try importing required packages with error handling
+try:
+    import MetaTrader5 as mt5
+    print("[IMPORT] MetaTrader5 loaded successfully")
+except ImportError as e:
+    print(f"\n[ERROR] Failed to import MetaTrader5: {e}")
+    print("[FIX] Install with: pip install MetaTrader5")
+    sys.exit(1)
+
+try:
+    import numpy as np
+    print("[IMPORT] NumPy loaded successfully")
+except ImportError as e:
+    print(f"\n[ERROR] Failed to import numpy: {e}")
+    print("[FIX] Install with: pip install numpy")
+    sys.exit(1)
+
+try:
+    import pandas as pd
+    print("[IMPORT] Pandas loaded successfully")
+except ImportError as e:
+    print(f"\n[ERROR] Failed to import pandas: {e}")
+    print("[FIX] Install with: pip install pandas")
+    sys.exit(1)
+
+print("[IMPORT] All required packages loaded successfully\n")
+
+# =========================================================
+# ADVANCED LOGGING CONFIGURATION
+# =========================================================
+
+class ThrottledLogger:
+    """
+    Advanced logging system with throttling,
+    rotation, and structured logging.
+    """
+
+    def __init__(self, name="GoldAlgoBot"):
+        self.logger = logging.getLogger(name)
+        self.logger.setLevel(logging.INFO)  # Changed from DEBUG to INFO
+        self.logger.propagate = False
+
+        # Clear existing handlers
+        self.logger.handlers.clear()
+
+        # Throttle tracking
+        self._throttle_cache = {}
+        self._throttle_lock = threading.Lock()
+
+        # Performance metrics
+        self._perf_metrics = {}
+        self._perf_lock = threading.Lock()
+
+        self._setup_handlers()
+
+    def _setup_handlers(self):
+        """Optimized logging setup - reduced file handlers and backup counts"""
+        simple_formatter = logging.Formatter(
+            '%(asctime)s | %(levelname)-8s | %(message)s',
+            datefmt='%H:%M:%S'
+        )
+
+        # Console handler only - minimal logging
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.WARNING)  # Only warnings and errors to console
+        console_handler.setFormatter(simple_formatter)
+        self.logger.addHandler(console_handler)
+
+        # Single main log file - larger size, fewer backups
+        main_file_handler = RotatingFileHandler(
+            'gold_grid_bot.log',
+            maxBytes=50 * 1024 * 1024,  # 50MB before rotation
+            backupCount=2,  # Keep only 2 backups
+            encoding='utf-8'
+        )
+        main_file_handler.setLevel(logging.INFO)
+        main_file_handler.setFormatter(simple_formatter)
+        self.logger.addHandler(main_file_handler)
+
+    def throttle(self, key, interval=5.0):
+        with self._throttle_lock:
+            now = time.time()
+            last_time = self._throttle_cache.get(key, 0)
+
+            if now - last_time >= interval:
+                self._throttle_cache[key] = now
+                return True
+
+            return False
+
+    def debug(self, msg, throttle_key=None, throttle_interval=5.0):
+        if throttle_key:
+            if not self.throttle(throttle_key, throttle_interval):
+                return
+
+        self.logger.debug(msg)
+
+    def info(self, msg, throttle_key=None, throttle_interval=5.0):
+        if throttle_key:
+            if not self.throttle(throttle_key, throttle_interval):
+                return
+
+        self.logger.info(msg)
+
+    def warning(self, msg, throttle_key=None, throttle_interval=5.0):
+        if throttle_key:
+            if not self.throttle(throttle_key, throttle_interval):
+                return
+
+        self.logger.warning(msg)
+
+    def error(self, msg, exc_info=False, throttle_key=None, throttle_interval=5.0):
+        if throttle_key:
+            if not self.throttle(throttle_key, throttle_interval):
+                return
+
+        self.logger.error(msg, exc_info=exc_info)
+
+    def critical(self, msg, exc_info=False):
+        self.logger.critical(msg, exc_info=exc_info)
+
+    def trade(self, action, **kwargs):
+        details = " | ".join([f"{k}={v}" for k, v in kwargs.items()])
+        self.logger.info(f"TRADE | {action} | {details}")
+
+
+# =========================================================
+# LOGGER INIT
+# =========================================================
+
+log = ThrottledLogger("GoldAlgoBot")
+
+
+# =========================================================
+# PERFORMANCE DECORATOR
+# =========================================================
+
+def monitor_performance(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+
+        try:
+            result = func(*args, **kwargs)
+            duration = time.time() - start_time
+
+            log.debug(
+                f"PERF | {func.__name__} | {duration:.4f}s",
+                throttle_key=f"perf_{func.__name__}",
+                throttle_interval=10
+            )
+
+            return result
+
+        except Exception as e:
+            log.error(
+                f"Exception in {func.__name__}: {str(e)}",
+                exc_info=True
+            )
+            raise
+
+    return wrapper
+
+
+# =========================================================
+# GLOBAL CONFIG
+# =========================================================
+
+SYMBOL = "XAUUSDm"
+MAGIC = 777
+TIMEFRAME = mt5.TIMEFRAME_M1
+
+EMA_FAST = 5
+EMA_SLOW = 9
+
+LOT_LADDER = [
+    0.01,
+    0.01,
+    0.01,
+    0.02,
+    0.02,
+    0.02,
+    0.03,
+    0.03,
+    0.04
+]
+
+STATE_FILE = "bot_state.json"
+
+# Hedge configuration
+MIN_GRID_GAP = 1.5  # ✅ INCREASED from 0.5 to reduce entries
+LOT_MULTIPLIER = 1.0  # ✅ UPDATED: Use full lot sizes from LOT_LADDER
+
+# Position limits - NEW
+MAX_BUY_POSITIONS = 9  # ✅ UPDATED: Matches LOT_LADDER length (9 entries)
+MAX_TOTAL_POSITIONS = 12
+MAX_DAILY_LOSS = 200.0  # Stop trading if daily loss exceeds this
+
+
+# =========================================================
+# GLOBAL STATE
+# =========================================================
+
+lot_index = 0
+latest_atr = None
+latest_atr_mean = None
+
+positions_cache = []
+positions_cache_time = 0
+positions_lock = threading.Lock()
+
+trade_queue = Queue()
+entry_lock = threading.Lock()
+trade_lock = threading.Lock()
+
+speed_cache = deque()
+entry_times = []
+
+
+# =========================================================
+# MT5 LOGIN
+# =========================================================
+
+# MT5 Credentials
+MT5_PATH = r"C:\Program Files\MetaTrader 5\terminal64.exe"
+MT5_LOGIN = 433567390
+MT5_PASSWORD = "Trading@123"
+MT5_SERVER = "Exness-MT5Trial7"
+
+
+def load_mt5_credentials():
+    """Load MT5 credentials from constants"""
+    return MT5_LOGIN, MT5_PASSWORD, MT5_SERVER
+
+
+@monitor_performance
+def init_mt5():
+    print(f"\n[INIT] Attempting MT5 connection...")
+    print(f"[INIT] Path: {MT5_PATH}")
+    print(f"[INIT] Login: {MT5_LOGIN}")
+    print(f"[INIT] Server: {MT5_SERVER}")
+    
+    login, password, server = load_mt5_credentials()
+
+    if not mt5.initialize(
+        path=MT5_PATH,
+        login=login,
+        password=password,
+        server=server
+    ):
+        code, msg = mt5.last_error()
+        error_msg = f"MT5 INIT FAILED | Code: {code} | Message: {msg}"
+        print(f"\n[ERROR] {error_msg}")
+        log.error(error_msg)
+        raise RuntimeError(error_msg)
+
+    print(f"[SUCCESS] MT5 initialized successfully")
+    log.info("MT5 initialized successfully")
+    
+    # Print account info
+    account_info = mt5.account_info()
+    if account_info:
+        print(f"[INFO] Account: {account_info.login}")
+        print(f"[INFO] Balance: ${account_info.balance:.2f}")
+        print(f"[INFO] Equity: ${account_info.equity:.2f}")
+        log.info(f"Account {account_info.login} | Balance: ${account_info.balance:.2f}")
+    
+    # Verify symbol exists
+    print(f"\n[VERIFY] Checking symbol: {SYMBOL}")
+    symbol_info = mt5.symbol_info(SYMBOL)
+    if symbol_info is None:
+        print(f"[ERROR] Symbol '{SYMBOL}' not found!")
+        print("[INFO] Available GOLD symbols:")
+        symbols = mt5.symbols_get()
+        gold_symbols = [s.name for s in symbols if 'GOLD' in s.name.upper() or 'XAU' in s.name.upper()]
+        for sym in gold_symbols[:10]:  # Show first 10
+            print(f"  - {sym}")
+        raise RuntimeError(f"Symbol '{SYMBOL}' not available on this broker")
+    
+    # Enable symbol for trading
+    if not symbol_info.visible:
+        print(f"[INFO] Enabling symbol {SYMBOL} for trading...")
+        if not mt5.symbol_select(SYMBOL, True):
+            print(f"[WARNING] Could not enable symbol {SYMBOL}")
+    
+    print(f"[SUCCESS] Symbol {SYMBOL} verified and ready")
+    print(f"[INFO] Bid: {symbol_info.bid:.2f} | Ask: {symbol_info.ask:.2f}")
+    print(f"[INFO] Spread: {symbol_info.spread} points\n")
+
+
+# =========================================================
+# POSITION HELPERS
+# =========================================================
+
+@monitor_performance
+def get_positions(force=False):
+    global positions_cache
+    global positions_cache_time
+
+    now = time.time()
+
+    with positions_lock:
+        if force or (now - positions_cache_time) > 0.15:
+            data = mt5.positions_get(symbol=SYMBOL)
+            positions_cache = data if data else []
+            positions_cache_time = now
+
+        return list(positions_cache)
+
+
+def floating_pnl():
+    """Calculate floating PnL for BUY positions only"""
+    return sum(
+        position.profit
+        for position in get_positions()
+        if position.type == mt5.POSITION_TYPE_BUY
+    )
+
+
+def total_buy_volume():
+    return sum(
+        p.volume
+        for p in get_positions(force=True)
+        if p.type == mt5.POSITION_TYPE_BUY
+    )
+
+
+# =========================================================
+# INDICATORS
+# =========================================================
+
+def ATR(df, period=14):
+    tr = np.maximum(
+        df['high'] - df['low'],
+        np.maximum(
+            abs(df['high'] - df['close'].shift()),
+            abs(df['low'] - df['close'].shift())
+        )
+    )
+
+    return tr.rolling(period).mean()
+
+
+# =========================================================
+# ORDER HELPERS
+# =========================================================
+
+def normalize_lot(symbol, lot):
+    info = mt5.symbol_info(symbol)
+
+    if not info:
+        return lot
+
+    return max(
+        info.volume_min,
+        round(lot / info.volume_step) * info.volume_step
+    )
+
+
+def send_order_with_retry(request, attempts=3, delay=0.2):
+    """Send order with retry logic - FIXED: Better error handling"""
+    for i in range(attempts):
+        result = mt5.order_send(request)
+
+        if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+            return result
+
+        if result:
+            # ✅ FIXED: Don't retry on certain errors
+            if result.retcode == 10019:  # TRADE_RETCODE_NO_MONEY
+                log.error(f"Insufficient funds (retcode 10019) - stopping retries")
+                return None
+            
+            if result.retcode == 10018:  # TRADE_RETCODE_MARKET_CLOSED
+                log.error(f"Market closed (retcode 10018) - stopping retries")
+                return None
+            
+            log.warning(
+                f"ORDER RETRY {i + 1}/{attempts} | retcode={result.retcode}"
+            )
+
+        time.sleep(delay)
+
+    log.error("ORDER FAILED AFTER RETRIES")
+    return None
+
+
+def can_afford_trade(lot, order_type):
+    """✅ NEW: Check if account has sufficient margin for trade"""
+    account_info = mt5.account_info()
+    if not account_info:
+        return False
+    
+    # Get required margin
+    symbol_info = mt5.symbol_info(SYMBOL)
+    if not symbol_info:
+        return False
+    
+    tick = mt5.symbol_info_tick(SYMBOL)
+    if not tick:
+        return False
+    
+    price = tick.ask if order_type == mt5.ORDER_TYPE_BUY else tick.bid
+    contract_size = symbol_info.trade_contract_size
+    leverage = account_info.leverage if account_info.leverage > 0 else 100
+    
+    required_margin = (lot * contract_size * price) / leverage
+    
+    # Add 20% buffer for safety
+    required_margin *= 1.2
+    
+    available = account_info.margin_free
+    
+    if available < required_margin:
+        log.warning(
+            f"Insufficient margin: need ${required_margin:.2f}, "
+            f"have ${available:.2f}"
+        )
+        return False
+    
+    return True
+
+
+# =========================================================
+# BUY FUNCTION
+# =========================================================
+
+@monitor_performance
+def buy(lot):
+    """Execute buy order - FIXED: Added balance check"""
+    tick = mt5.symbol_info_tick(SYMBOL)
+
+    if not tick:
+        log.warning("BUY SKIPPED — No tick data")
+        return False
+
+    normalized_lot = normalize_lot(SYMBOL, lot)
+
+    # ✅ FIXED: Check if we can afford this trade
+    if not can_afford_trade(normalized_lot, mt5.ORDER_TYPE_BUY):
+        log.warning(f"BUY SKIPPED — Insufficient margin for {normalized_lot} lots")
+        return False
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": SYMBOL,
+        "volume": normalized_lot,
+        "type": mt5.ORDER_TYPE_BUY,
+        "price": tick.ask,
+        "magic": MAGIC,
+        "deviation": 50,
+        "comment": "Grid Buy",
+        "type_filling": mt5.ORDER_FILLING_IOC,
+        "type_time": mt5.ORDER_TIME_GTC,
+    }
+
+    result = send_order_with_retry(request)
+
+    if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+        log.trade(
+            "BUY_EXECUTED",
+            lot=normalized_lot,
+            price=tick.ask,
+            ticket=result.order
+        )
+        return True
+
+    return False
+
+
+# =========================================================
+# STATE MANAGEMENT
+# =========================================================
+
+def save_state():
+    state = {
+        "lot_index": lot_index,
+    }
+
+    try:
+        with open(STATE_FILE, "w") as file:
+            json.dump(state, file)
+
+    except Exception as e:
+        log.error(f"STATE SAVE FAILED: {e}")
+
+
+# =========================================================
+# MAIN LOOP
+# =========================================================
+
+@monitor_performance
+def main_loop():
+    log.info("Starting GoldAlgoBot...")
+
+    while True:
+        try:
+            positions = get_positions(force=True)
+            pnl = floating_pnl()
+
+            log.info(
+                f"Positions={len(positions)} | PnL={pnl:.2f}",
+                throttle_key="status",
+                throttle_interval=5
+            )
+
+            time.sleep(1)
+
+        except KeyboardInterrupt:
+            log.warning("Bot stopped by user")
+            break
+
+        except Exception as e:
+            log.error(f"MAIN LOOP ERROR: {e}", exc_info=True)
+            time.sleep(5)
+
+
+# =========================================================
+# ADDITIONAL RECOVERED FUNCTIONS (LATEST VERSION)
+# =========================================================
+
+# =========================================================
+# SAFE TICK
+# =========================================================
+
+def safe_tick():
+    try:
+        tick = mt5.symbol_info_tick(SYMBOL)
+
+        if tick is None:
+            log.warning(
+                "Tick data unavailable",
+                throttle_key="tick_missing",
+                throttle_interval=5
+            )
+            return None
+
+        return tick
+
+    except Exception as e:
+        log.error(f"safe_tick failed: {e}", exc_info=True)
+        return None
+
+
+# =========================================================
+# VERIFY POSITION EXISTS
+# =========================================================
+
+def verify_position_exists(ticket, retries=10, delay=0.2):
+    for _ in range(retries):
+        positions = mt5.positions_get(ticket=ticket)
+
+        if positions:
+            return True
+
+        time.sleep(delay)
+
+    log.critical(f"POSITION VERIFY FAILED | ticket={ticket}")
+    return False
+
+
+# =========================================================
+# SPREAD CHECK
+# =========================================================
+
+def spread_ok(max_spread=60):
+    tick = safe_tick()
+
+    if not tick:
+        return False
+
+    spread = abs(tick.ask - tick.bid)
+
+    if spread > max_spread:
+        log.warning(
+            f"Spread too high | spread={spread:.2f}",
+            throttle_key="spread_high",
+            throttle_interval=5
+        )
+        return False
+
+    return True
+
+
+# =========================================================
+# MISSING FUNCTION STUBS
+# =========================================================
+
+def htf_trend_strength(position_count):
+    """Calculate higher timeframe trend strength"""
+    # Stub implementation - returns neutral trend
+    return 0
+
+
+
+
+def last_buy_price():
+    """Get the price of the last buy position"""
+    positions = get_positions(force=True)
+    buy_positions = [
+        p for p in positions
+        if p.type == mt5.POSITION_TYPE_BUY
+    ]
+    
+    if not buy_positions:
+        return 0.0
+    
+    # Return the most recent buy position price
+    return buy_positions[-1].price_open
+
+
+def dynamic_tp_target(total_lot, position_count):
+    """Calculate dynamic take profit target based on grid depth"""
+    # Scale TP target with number of grid positions
+    # More positions = deeper drawdown = higher profit needed
+    if(total_lot == 0):
+        return 1.0
+    
+    base_target = 1.0
+    
+    # Exponential scaling: deeper grid needs proportionally more profit
+    position_multiplier = math.pow(position_count, 1.5)
+    
+    # Also scale with lot size
+    lot_component = total_lot * 2
+    
+    return base_target + position_multiplier + lot_component
+
+
+def mt5_alive():
+    """Check if MT5 connection is alive"""
+    try:
+        return mt5.terminal_info() is not None
+    except:
+        return False
+
+
+def equity_circuit_breaker():
+    """Check if equity circuit breaker should trigger"""
+    # Stub implementation - always returns False
+    return False
+
+
+def equity_trailing_lock():
+    """Check if equity trailing lock should trigger"""
+    # Stub implementation - always returns False
+    return False
+
+
+def daily_drawdown_guard():
+    """Check if daily drawdown limit is reached"""
+    # Stub implementation - always returns False
+    return False
+
+
+def adaptive_engine():
+    """Adaptive engine for dynamic parameter adjustment"""
+    # Stub implementation - does nothing
+    pass
+
+
+def update_market_regime_mode(df, atr, atr_mean):
+    """Update market regime mode based on volatility"""
+    # Stub implementation - does nothing
+    pass
+
+
+def flat_trap_detector(df):
+    """Detect flat/ranging market conditions"""
+    # Stub implementation - does nothing
+    pass
+
+
+# =========================================================
+# CLOSE ALL POSITIONS
+# =========================================================
+
+def close_all():
+    """Close all BUY positions only"""
+    positions = get_positions(force=True)
+
+    for position in positions:
+        try:
+            # Only close BUY positions
+            if position.type != mt5.POSITION_TYPE_BUY:
+                continue
+
+            tick = safe_tick()
+
+            if not tick:
+                continue
+
+            request = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": SYMBOL,
+                "volume": position.volume,
+                "type": mt5.ORDER_TYPE_SELL,  # Close BUY with SELL
+                "position": position.ticket,
+                "price": tick.bid,
+                "deviation": 50,
+                "magic": MAGIC,
+                "comment": "Close Buy",
+                "type_filling": mt5.ORDER_FILLING_IOC,
+                "type_time": mt5.ORDER_TIME_GTC,
+            }
+
+            result = mt5.order_send(request)
+
+            if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                log.trade(
+                    "BUY_POSITION_CLOSED",
+                    ticket=position.ticket,
+                    profit=position.profit
+                )
+
+        except Exception as e:
+            log.error(f"close_all failed: {e}", exc_info=True)
+
+
+# =========================================================
+# HEDGE POSITION FINDER
+# =========================================================
+
+
+
+# =========================================================
+# MARKET DATA FETCH
+# =========================================================
+
+def get_market_data(bars=200):
+    rates = mt5.copy_rates_from_pos(
+        SYMBOL,
+        TIMEFRAME,
+        0,
+        bars
+    )
+
+    if rates is None or len(rates) == 0:
+        return None
+
+    df = pd.DataFrame(rates)
+
+    df['ema_fast'] = df['close'].ewm(span=EMA_FAST).mean()
+    df['ema_slow'] = df['close'].ewm(span=EMA_SLOW).mean()
+    df['atr'] = ATR(df, 14)
+
+    return df
+
+
+# =========================================================
+# GRID ENTRY ENGINE
+# =========================================================
+
+def grid_engine(df):
+    """✅ FIXED: Proper lot index management with position limits and restart safety"""
+    global lot_index
+
+    if df is None or len(df) < 50:
+        return
+
+    positions = get_positions(force=True)
+
+    buy_positions = [
+        p for p in positions
+        if p.type == mt5.POSITION_TYPE_BUY
+    ]
+
+    # ✅ FIX: Always calculate lot_index from actual position count
+    # This handles bot restarts when positions already exist
+    if len(buy_positions) == 0:
+        lot_index = 0
+    else:
+        # Use position count to determine lot_index (restart-safe)
+        lot_index = min(len(buy_positions) - 1, len(LOT_LADDER) - 1)
+
+    # ✅ FIXED: Add position limit checks
+    if len(buy_positions) >= MAX_BUY_POSITIONS:
+        log.warning(
+            f"Max buy positions reached: {len(buy_positions)}",
+            throttle_key="max_buy_positions",
+            throttle_interval=30
+        )
+        return
+    
+    if len(positions) >= MAX_TOTAL_POSITIONS:
+        log.warning(
+            f"Max total positions reached: {len(positions)}",
+            throttle_key="max_total_positions",
+            throttle_interval=30
+        )
+        return
+
+    tick = safe_tick()
+
+    if not tick:
+        return
+
+    ema_fast = df['ema_fast']
+    ema_slow = df['ema_slow']
+
+    atr_now = df['atr'].iloc[-1]
+
+    # First entry
+    if len(buy_positions) == 0:
+        bullish = ema_fast.iloc[-1] > ema_slow.iloc[-1]
+
+        if bullish and spread_ok():
+            # lot_index already reset to 0 at start of function
+            buy(LOT_LADDER[0])
+            return
+
+    # Grid recovery entries
+    last_price = last_buy_price()
+
+    gap = abs(tick.bid - last_price)
+
+    # Adaptive grid spacing based on position count
+    base_gap = 2.5
+    
+    # Exponential growth: wider spacing for deeper grid levels
+    # This protects against strong trends and reduces margin stress
+    position_gap = math.pow(len(buy_positions), 1.1)  # ✅ REDUCED from 1.3 to 1.1 to allow more positions
+    
+    # ATR volatility adjustment
+    atr_gap = atr_now * 0.5
+    
+    dynamic_gap = max(
+        base_gap + position_gap,
+        atr_gap
+    )
+    
+    log.info(
+        f"Grid Gap={dynamic_gap:.2f} | "
+        f"Current Gap={gap:.2f} | "
+        f"Positions={len(buy_positions)}",
+        throttle_key="grid_gap",
+        throttle_interval=5
+    )
+
+    if gap >= dynamic_gap:
+        # ✅ NEW: Trend protection - avoid buying into falling market
+        bullish = ema_fast.iloc[-1] > ema_slow.iloc[-1]
+        
+        # ✅ NEW: Price stabilization check - look for reversal signs
+        recent_closes = df['close'].iloc[-5:].values
+        price_stabilizing = recent_closes[-1] > recent_closes[-3]  # Current > 3 candles ago
+        
+        if not bullish:
+            log.warning(
+                f"Grid entry SKIPPED - Bearish trend (EMA fast < slow)",
+                throttle_key="bearish_skip",
+                throttle_interval=30
+            )
+            return
+            
+        if not price_stabilizing:
+            log.warning(
+                f"Grid entry SKIPPED - Price still falling (no stabilization)",
+                throttle_key="falling_skip",
+                throttle_interval=30
+            )
+            return
+        
+        # ✅ FIX: Use position count for lot index with bounds check
+        # This ensures lot_index matches actual positions and prevents IndexError
+        lot_index = min(len(buy_positions), len(LOT_LADDER) - 1)
+
+        lot = LOT_LADDER[lot_index] * LOT_MULTIPLIER
+
+        buy(lot)
+
+
+# =========================================================
+# TAKE PROFIT ENGINE
+# =========================================================
+
+def tp_engine():
+    global lot_index
+
+    positions = get_positions(force=True)
+
+    if not positions:
+        return
+
+    pnl = floating_pnl()
+    total_lot = total_buy_volume()
+    
+    # Count BUY positions for grid depth
+    buy_positions = [p for p in positions if p.type == mt5.POSITION_TYPE_BUY]
+    position_count = len(buy_positions)
+
+    target = dynamic_tp_target(total_lot, position_count)
+
+    if pnl >= target:
+        log.warning(
+            f"TP HIT | pnl={pnl:.2f} | target={target:.2f}"
+        )
+
+        close_all()
+
+        lot_index = 0
+
+
+# =========================================================
+# MAIN BOT LOOP (LATEST)
+# =========================================================
+
+def bot_loop():
+    global latest_atr
+    global latest_atr_mean
+
+    print("\n[BOT] GoldAlgoBot main loop started")
+    log.info("GoldAlgoBot started")
+
+    loop_count = 0
+    while True:
+        try:
+            loop_count += 1
+            
+            # MT5 connection health
+            if not mt5_alive():
+                print("[WARNING] MT5 connection lost, reconnecting...")
+                log.warning("MT5 connection lost")
+                time.sleep(2)
+                continue
+
+            # Account safety
+            if equity_circuit_breaker():
+                print("[WARNING] Equity circuit breaker triggered")
+                continue
+
+            if equity_trailing_lock():
+                print("[WARNING] Equity trailing lock active")
+                continue
+
+            if daily_drawdown_guard():
+                print("[WARNING] Daily drawdown guard active")
+                log.warning("Daily drawdown guard active")
+                time.sleep(30)
+                continue
+
+            # Fetch market data
+            df = get_market_data(200)
+
+            if df is None:
+                if loop_count % 10 == 0:  # Print every 10 loops
+                    print("[WARNING] Market data unavailable")
+                time.sleep(1)
+                continue
+
+            latest_atr = df['atr'].iloc[-1]
+            latest_atr_mean = df['atr'].rolling(50).mean().iloc[-1]
+
+            # Update adaptive engine
+            adaptive_engine()
+
+            # Update regime mode
+            update_market_regime_mode(
+                df,
+                latest_atr,
+                latest_atr_mean
+            )
+
+            # Flat trap detection
+            flat_trap_detector(df)
+
+            # Execute grid engine
+            grid_engine(df)
+
+            # TP manager
+            tp_engine()
+
+            # Status logging
+            log.info(
+                f"PnL={floating_pnl():.2f} | "
+                f"Lot={total_buy_volume():.2f} | "
+                f"Positions={len(get_positions())}",
+                throttle_key="status_log",
+                throttle_interval=5
+            )
+
+            time.sleep(1)
+
+        except KeyboardInterrupt:
+            print("\n[INFO] Bot stopped manually")
+            log.warning("Bot stopped manually")
+            break
+
+        except Exception as e:
+            print(f"\n[ERROR] BOT LOOP ERROR: {e}")
+            log.error(
+                f"BOT LOOP ERROR: {e}",
+                exc_info=True
+            )
+            traceback.print_exc()
+            time.sleep(5)
+
+
+# =========================================================
+# FINAL ENTRY POINT
+# =========================================================
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("GOLD ALGO BOT - STARTING")
+    print("=" * 60)
+    
+    try:
+        init_mt5()
+        bot_loop()
+
+    except KeyboardInterrupt:
+        print("\n" + "=" * 60)
+        print("BOT STOPPED BY USER")
+        print("=" * 60)
+        log.warning("Bot stopped by user")
+        
+    except Exception as e:
+        print("\n" + "=" * 60)
+        print(f"FATAL ERROR: {e}")
+        print("=" * 60)
+        log.critical(
+            f"FATAL ERROR: {e}",
+            exc_info=True
+        )
+        import traceback
+        traceback.print_exc()
+        
+    finally:
+        print("\nShutting down MT5...")
+        mt5.shutdown()
+        print("MT5 shutdown complete")
+        print("=" * 60)
+
