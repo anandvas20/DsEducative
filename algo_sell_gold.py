@@ -205,14 +205,14 @@ ATR_PERIOD = 14
 # Safer lot ladder - no dangerous jumps
 LOT_LADDER = [
     0.01,
-    0.01,
-    0.01,
     0.02,
-    0.02,
-    0.02,
-    0.03,
-    0.03,
-    0.04
+    0.04,
+    0.06,
+    0.08,
+    0.12,
+    0.14,
+    0.15,
+    0.16
 ]
 STATE_FILE = "gold_grid_state_sell.json"
 
@@ -778,6 +778,7 @@ def close_all():
 # =========================================================
 
 def get_market_data(bars=200):
+    """Get M5 market data with indicators"""
     rates = mt5.copy_rates_from_pos(
         SYMBOL,
         TIMEFRAME,
@@ -798,12 +799,190 @@ def get_market_data(bars=200):
     return df
 
 
+def get_multi_timeframe_data():
+    """
+    Get market data from multiple timeframes for better trend analysis (SELL side)
+    Returns: dict with M1, M5, M15 dataframes
+    """
+    mtf_data = {}
+    
+    # M1 - 200 candles (3.3 hours) - for precise entry timing
+    rates_m1 = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M1, 0, 200)
+    if rates_m1 is not None and len(rates_m1) > 0:
+        df_m1 = pd.DataFrame(rates_m1)
+        df_m1['ema_fast'] = df_m1['close'].ewm(span=5).mean()
+        df_m1['ema_slow'] = df_m1['close'].ewm(span=9).mean()
+        df_m1['atr'] = ATR(df_m1, 14)
+        mtf_data['M1'] = df_m1
+    
+    # M5 - 100 candles (8.3 hours) - for short-term trend
+    rates_m5 = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M5, 0, 100)
+    if rates_m5 is not None and len(rates_m5) > 0:
+        df_m5 = pd.DataFrame(rates_m5)
+        df_m5['ema_fast'] = df_m5['close'].ewm(span=9).mean()
+        df_m5['ema_slow'] = df_m5['close'].ewm(span=21).mean()
+        df_m5['atr'] = ATR(df_m5, 14)
+        df_m5['rsi'] = RSI(df_m5['close'], 14)
+        mtf_data['M5'] = df_m5
+    
+    # M15 - 50 candles (12.5 hours) - for medium-term trend
+    rates_m15 = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_M15, 0, 50)
+    if rates_m15 is not None and len(rates_m15) > 0:
+        df_m15 = pd.DataFrame(rates_m15)
+        df_m15['ema_fast'] = df_m15['close'].ewm(span=9).mean()
+        df_m15['ema_slow'] = df_m15['close'].ewm(span=21).mean()
+        df_m15['atr'] = ATR(df_m15, 14)
+        mtf_data['M15'] = df_m15
+    
+    return mtf_data if len(mtf_data) == 3 else None
+
+
+def detect_support_resistance_sell(df, lookback=50):
+    """
+    Detect key support and resistance levels for SELL side
+    Returns: dict with support/resistance levels and current price position
+    """
+    if df is None or len(df) < lookback:
+        return None
+    
+    closes = df['close'].iloc[-lookback:].values
+    highs = df['high'].iloc[-lookback:].values
+    lows = df['low'].iloc[-lookback:].values
+    current_price = closes[-1]
+    
+    # Find swing highs (resistance) - local maxima
+    resistance_levels = []
+    for i in range(2, len(highs) - 2):
+        if highs[i] > highs[i-1] and highs[i] > highs[i-2] and \
+           highs[i] > highs[i+1] and highs[i] > highs[i+2]:
+            resistance_levels.append(highs[i])
+    
+    # Find swing lows (support) - local minima
+    support_levels = []
+    for i in range(2, len(lows) - 2):
+        if lows[i] < lows[i-1] and lows[i] < lows[i-2] and \
+           lows[i] < lows[i+1] and lows[i] < lows[i+2]:
+            support_levels.append(lows[i])
+    
+    # Find nearest resistance above current price
+    resistance_above = [r for r in resistance_levels if r > current_price]
+    nearest_resistance = min(resistance_above) if resistance_above else None
+    
+    # Find nearest support below current price
+    support_below = [s for s in support_levels if s < current_price]
+    nearest_support = max(support_below) if support_below else None
+    
+    # Calculate distance to nearest levels
+    distance_to_resistance = None
+    distance_to_support = None
+    
+    if nearest_resistance:
+        distance_to_resistance = nearest_resistance - current_price
+    
+    if nearest_support:
+        distance_to_support = current_price - nearest_support
+    
+    # ✅ SELL SIDE: Determine if price is near support (within 3 points) - AVOID SELLING HERE
+    near_support = distance_to_support is not None and distance_to_support < 3.0
+    
+    # ✅ SELL SIDE: Determine if price is near resistance (within 3 points) - GOOD FOR SELLING
+    near_resistance = distance_to_resistance is not None and distance_to_resistance < 3.0
+    
+    # ✅ SELL SIDE: Check for breakdown - price recently broke below support
+    breakdown_detected = False
+    if support_levels:
+        recent_support = min([s for s in support_levels if s > current_price], default=None)
+        if recent_support and (recent_support - current_price) < 5.0:
+            # Price is within 5 points below a recent support = potential breakdown
+            breakdown_detected = True
+    
+    return {
+        'current_price': current_price,
+        'nearest_resistance': nearest_resistance,
+        'nearest_support': nearest_support,
+        'distance_to_resistance': distance_to_resistance,
+        'distance_to_support': distance_to_support,
+        'near_support': near_support,
+        'near_resistance': near_resistance,
+        'breakdown_detected': breakdown_detected,
+        'resistance_levels': resistance_levels,
+        'support_levels': support_levels
+    }
+
+
+def analyze_multi_timeframe_trend_sell(mtf_data):
+    """
+    Analyze trend across multiple timeframes for SELL side with support/resistance
+    Returns: dict with trend analysis
+    """
+    if not mtf_data or len(mtf_data) != 3:
+        return None
+    
+    analysis = {
+        'M1_bearish': False,
+        'M5_bearish': False,
+        'M15_bearish': False,
+        'trend_strength': 0,  # 0-3 (number of bearish timeframes)
+        'trend_aligned': False,  # All timeframes agree
+        'entry_allowed': False,
+        'sr_analysis': None,  # Support/Resistance analysis
+        'block_reason': None,
+        'favorable_entry': False
+    }
+    
+    # Check each timeframe for BEARISH trend
+    if 'M1' in mtf_data:
+        df_m1 = mtf_data['M1']
+        analysis['M1_bearish'] = df_m1['ema_fast'].iloc[-1] < df_m1['ema_slow'].iloc[-1]
+    
+    if 'M5' in mtf_data:
+        df_m5 = mtf_data['M5']
+        analysis['M5_bearish'] = df_m5['ema_fast'].iloc[-1] < df_m5['ema_slow'].iloc[-1]
+        
+        # Detect support/resistance on M5 (more reliable than M1)
+        analysis['sr_analysis'] = detect_support_resistance_sell(df_m5, lookback=50)
+    
+    if 'M15' in mtf_data:
+        df_m15 = mtf_data['M15']
+        analysis['M15_bearish'] = df_m15['ema_fast'].iloc[-1] < df_m15['ema_slow'].iloc[-1]
+    
+    # Calculate trend strength (bearish)
+    analysis['trend_strength'] = sum([
+        analysis['M1_bearish'],
+        analysis['M5_bearish'],
+        analysis['M15_bearish']
+    ])
+    
+    # All timeframes aligned (bearish)
+    analysis['trend_aligned'] = analysis['trend_strength'] == 3
+    
+    # Entry allowed if at least M5 and M15 are bearish (stronger confirmation)
+    analysis['entry_allowed'] = analysis['M5_bearish'] and analysis['M15_bearish']
+    
+    # ✅ CRITICAL FOR SELL: Block entry if near support (unless breakdown confirmed)
+    if analysis['sr_analysis']:
+        sr = analysis['sr_analysis']
+        
+        # Don't sell near support unless it's a confirmed breakdown
+        if sr['near_support'] and not sr['breakdown_detected']:
+            analysis['entry_allowed'] = False
+            analysis['block_reason'] = 'near_support'
+        
+        # Prefer entries near resistance or after breakdown
+        if sr['near_resistance'] or sr['breakdown_detected']:
+            analysis['favorable_entry'] = True
+        else:
+            analysis['favorable_entry'] = False
+    
+    return analysis
+
+
 # =========================================================
 # GRID ENTRY ENGINE
 # =========================================================
 
-def grid_engine(df):
-    """✅ FIXED: Proper lot index management with position limits and restart safety"""
+def grid_engine(df, mtf_data=None):
+    """✅ ENHANCED: Multi-timeframe trend analysis with S/R for SELL side"""
     global lot_index
 
     if df is None or len(df) < 50:
@@ -851,12 +1030,72 @@ def grid_engine(df):
 
     atr_now = df['atr'].iloc[-1]
 
+    # ✅ ENHANCED: Multi-timeframe trend analysis with S/R detection for SELL
+    trend_analysis = None
+    if mtf_data:
+        trend_analysis = analyze_multi_timeframe_trend_sell(mtf_data)
+        
+        if trend_analysis:
+            # Enhanced logging with S/R info
+            sr_info = ""
+            if trend_analysis['sr_analysis']:
+                sr = trend_analysis['sr_analysis']
+                sr_info = f" | SR: Res={sr['distance_to_resistance']:.1f if sr['distance_to_resistance'] else 'N/A'} " \
+                         f"Sup={sr['distance_to_support']:.1f if sr['distance_to_support'] else 'N/A'} " \
+                         f"Breakdown={sr['breakdown_detected']}"
+            
+            log.info(
+                f"MTF Trend (SELL) | M1:{trend_analysis['M1_bearish']} | "
+                f"M5:{trend_analysis['M5_bearish']} | "
+                f"M15:{trend_analysis['M15_bearish']} | "
+                f"Strength:{trend_analysis['trend_strength']}/3 | "
+                f"Entry:{trend_analysis['entry_allowed']}{sr_info}",
+                throttle_key="mtf_trend",
+                throttle_interval=10
+            )
+
     # First entry with strong filters
     if len(sell_positions) == 0:
         # Entry cooldown check
         if entry_times:
             last_entry = entry_times[-1]
             if time.time() - last_entry < MIN_ENTRY_DELAY:
+                return
+        
+        # ✅ ENHANCED: Use multi-timeframe confirmation with S/R for first entry
+        if trend_analysis:
+            # Check if entry is blocked by support
+            if trend_analysis['block_reason'] == 'near_support':
+                log.warning(
+                    f"First SELL entry BLOCKED - Price near support (avoid selling at floor)",
+                    throttle_key="support_block",
+                    throttle_interval=30
+                )
+                return
+            
+            # Require M5 and M15 to be bearish for first entry
+            if not trend_analysis['entry_allowed']:
+                log.warning(
+                    f"First SELL entry BLOCKED - MTF not aligned (M5:{trend_analysis['M5_bearish']}, M15:{trend_analysis['M15_bearish']})",
+                    throttle_key="mtf_block",
+                    throttle_interval=30
+                )
+                return
+            
+            # Log favorable entry conditions
+            if trend_analysis['favorable_entry']:
+                log.info(
+                    "✅ FAVORABLE SELL ENTRY - Near resistance or breakdown detected",
+                    throttle_key="favorable_entry",
+                    throttle_interval=60
+                )
+        else:
+            # Fallback to existing logic if MTF unavailable
+            bearish = (
+                ema_fast.iloc[-1] < ema_slow.iloc[-1]
+                and higher_tf_bearish()
+            )
+            if not bearish:
                 return
         
         # RSI filter - avoid oversold
@@ -868,16 +1107,7 @@ def grid_engine(df):
         # Bearish candle confirmation
         bearish_candle = df['close'].iloc[-1] < df['open'].iloc[-1]
         
-        # Combined entry signal
-        bearish = (
-            ema_fast.iloc[-1] < ema_slow.iloc[-1]
-            and higher_tf_bearish()
-            and rsi_ok
-            and atr_ok
-            and bearish_candle
-        )
-
-        if bearish and spread_ok(max_spread=35):
+        if rsi_ok and atr_ok and bearish_candle and spread_ok(max_spread=35):
             # lot_index already reset to 0 at start of function
             if sell(LOT_LADDER[0]):
                 entry_times.append(time.time())
@@ -885,20 +1115,6 @@ def grid_engine(df):
 
     # Grid recovery entries with trend protection
     last_price = last_sell_price()
-    
-    # Prevent selling into strong uptrends
-    strong_uptrend = (
-        ema_fast.iloc[-1] > ema_slow.iloc[-1]
-        and ema_fast.iloc[-2] > ema_slow.iloc[-2]
-    )
-    
-    if strong_uptrend:
-        log.warning(
-            "Strong uptrend detected - skipping recovery entry",
-            throttle_key="uptrend_skip",
-            throttle_interval=30
-        )
-        return
     
     # Entry cooldown for recovery
     if entry_times:
@@ -931,6 +1147,43 @@ def grid_engine(df):
     )
 
     if gap >= dynamic_gap:
+        # ✅ ENHANCED: Multi-timeframe trend protection with S/R for grid entries
+        bearish = ema_fast.iloc[-1] < ema_slow.iloc[-1]
+        
+        # Use MTF analysis if available
+        if trend_analysis:
+            # ✅ CRITICAL: Also check S/R for grid entries
+            if trend_analysis['block_reason'] == 'near_support':
+                log.warning(
+                    f"Grid SELL entry SKIPPED - Price near support (avoid adding at floor)",
+                    throttle_key="grid_support_block",
+                    throttle_interval=30
+                )
+                return
+            
+            # For grid entries, require at least 2 out of 3 timeframes bearish
+            if trend_analysis['trend_strength'] < 2:
+                log.warning(
+                    f"Grid SELL entry SKIPPED - Weak MTF trend (strength:{trend_analysis['trend_strength']}/3)",
+                    throttle_key="weak_mtf_trend",
+                    throttle_interval=30
+                )
+                return
+        else:
+            # Fallback: Prevent selling into strong uptrends
+            strong_uptrend = (
+                ema_fast.iloc[-1] > ema_slow.iloc[-1]
+                and ema_fast.iloc[-2] > ema_slow.iloc[-2]
+            )
+            
+            if strong_uptrend:
+                log.warning(
+                    "Strong uptrend detected - skipping recovery entry",
+                    throttle_key="uptrend_skip",
+                    throttle_interval=30
+                )
+                return
+        
         # ✅ FIX: Use position count for lot index with bounds check
         # This ensures lot_index matches actual positions and prevents IndexError
         lot_index = min(len(sell_positions), len(LOT_LADDER) - 1)
@@ -982,8 +1235,8 @@ def bot_loop():
     global latest_atr
     global latest_atr_mean
 
-    print("\n[BOT] GoldAlgoBot main loop started")
-    log.info("GoldAlgoBot started")
+    print("\n[BOT] GoldAlgoBot SELL side main loop started with Multi-Timeframe Analysis")
+    log.info("GoldAlgoBot SELL side started with MTF (M1, M5, M15)")
 
     loop_count = 0
     while True:
@@ -1012,8 +1265,15 @@ def bot_loop():
                 time.sleep(30)
                 continue
 
-            # Fetch market data
-            df = get_market_data(200)
+            # ✅ ENHANCED: Fetch multi-timeframe market data
+            mtf_data = get_multi_timeframe_data()
+            
+            # Fallback to M5 only if MTF fails
+            if mtf_data is None:
+                log.warning("MTF data unavailable, using M5 only", throttle_key="mtf_fail", throttle_interval=60)
+                df = get_market_data(200)
+            else:
+                df = mtf_data.get('M5')
 
             if df is None:
                 if loop_count % 10 == 0:  # Print every 10 loops
@@ -1037,8 +1297,8 @@ def bot_loop():
             # Flat trap detection
             flat_trap_detector(df)
 
-            # Execute grid engine
-            grid_engine(df)
+            # ✅ ENHANCED: Execute grid engine with multi-timeframe data
+            grid_engine(df, mtf_data)
 
             # TP manager
             tp_engine()
