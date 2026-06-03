@@ -48,6 +48,16 @@ except ImportError as e:
     print("[FIX] Install with: pip install pandas")
     sys.exit(1)
 
+try:
+    from google import genai
+    print("[IMPORT] Google Gemini AI loaded successfully")
+    GEMINI_AVAILABLE = True
+except ImportError as e:
+    print(f"\n[WARNING] Google Gemini AI not available: {e}")
+    print("[INFO] Install with: pip install google-genai")
+    print("[INFO] Bot will run without AI assistance")
+    GEMINI_AVAILABLE = False
+
 print("[IMPORT] All required packages loaded successfully\n")
 
 # =========================================================
@@ -226,6 +236,22 @@ MAX_SELL_POSITIONS = 9  # Reduced from 8
 MAX_TOTAL_POSITIONS = 12 # Reduced from 12
 MAX_DAILY_LOSS = 200.0
 
+# =========================================================
+# GEMINI AI CONFIGURATION (SELL SIDE)
+# =========================================================
+
+GEMINI_API_KEY = "" # Set via environment variable
+GEMINI_MODEL = "gemini-2.5-flash" # Full model path for google-genai package
+GEMINI_ENABLED = GEMINI_AVAILABLE and len(GEMINI_API_KEY) > 0
+GEMINI_CACHE_DURATION = 180  # Cache AI decisions for 180 seconds (3 minutes)
+
+# AI decision cache
+ai_decision_cache = {
+    'signal': None,
+    'timestamp': 0,
+    'confidence': 0
+}
+
 
 # =========================================================
 # GLOBAL STATE
@@ -379,6 +405,213 @@ def RSI(series, period=14):
     avg_loss = loss.rolling(period).mean()
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
+
+
+def MACD(series, fast=12, slow=26, signal=9):
+    """Calculate MACD indicator"""
+    ema_fast = series.ewm(span=fast).mean()
+    ema_slow = series.ewm(span=slow).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal).mean()
+    return macd_line, signal_line
+
+
+# =========================================================
+# GEMINI AI INTEGRATION (SELL SIDE)
+# =========================================================
+
+def prepare_market_data_for_ai_sell(df, mtf_data=None, sr_analysis=None):
+    """
+    Prepare market data in JSON format for Gemini AI (SELL side)
+    Sends precomputed indicators instead of raw OHLC
+    """
+    if df is None or len(df) < 20:
+        return None
+    
+    tick = safe_tick()
+    if not tick:
+        return None
+    
+    # Calculate indicators
+    current_price = df['close'].iloc[-1]
+    rsi = df['rsi'].iloc[-1] if 'rsi' in df.columns else RSI(df['close'], 14).iloc[-1]
+    macd_line, macd_signal = MACD(df['close'])
+    macd = macd_line.iloc[-1]
+    macd_sig = macd_signal.iloc[-1]
+    
+    ema20 = df['close'].ewm(span=20).mean().iloc[-1]
+    ema50 = df['close'].ewm(span=50).mean().iloc[-1]
+    ema200 = df['close'].ewm(span=200).mean().iloc[-1] if len(df) >= 200 else ema50
+    
+    atr = df['atr'].iloc[-1] if 'atr' in df.columns else ATR(df, 14).iloc[-1]
+    
+    # Trend direction (SELL side - bearish is good)
+    trend = "BEARISH" if df['ema_fast'].iloc[-1] < df['ema_slow'].iloc[-1] else "BULLISH"
+    
+    # Support/Resistance from analysis
+    support = sr_analysis['nearest_support'] if sr_analysis and sr_analysis['nearest_support'] else current_price - (atr * 2)
+    resistance = sr_analysis['nearest_resistance'] if sr_analysis and sr_analysis['nearest_resistance'] else current_price + (atr * 2)
+    
+    # Multi-timeframe trend
+    mtf_trend = "NEUTRAL"
+    if mtf_data:
+        m5_bearish = mtf_data.get('M5', {}).get('ema_fast', pd.Series([0])).iloc[-1] < mtf_data.get('M5', {}).get('ema_slow', pd.Series([0])).iloc[-1] if 'M5' in mtf_data else False
+        m15_bearish = mtf_data.get('M15', {}).get('ema_fast', pd.Series([0])).iloc[-1] < mtf_data.get('M15', {}).get('ema_slow', pd.Series([0])).iloc[-1] if 'M15' in mtf_data else False
+        
+        if m5_bearish and m15_bearish:
+            mtf_trend = "STRONG_BEARISH"
+        elif not m5_bearish and not m15_bearish:
+            mtf_trend = "STRONG_BULLISH"
+        else:
+            mtf_trend = "MIXED"
+    
+    # Volume (approximate from tick volume)
+    volume = int(df['tick_volume'].iloc[-1]) if 'tick_volume' in df.columns else 1000
+    
+    market_data = {
+        "symbol": SYMBOL,
+        "timeframe": "M5",
+        "price": round(float(current_price), 2),
+        "rsi": round(float(rsi), 2),
+        "macd": round(float(macd), 4),
+        "macd_signal": round(float(macd_sig), 4),
+        "ema20": round(float(ema20), 2),
+        "ema50": round(float(ema50), 2),
+        "ema200": round(float(ema200), 2),
+        "atr": round(float(atr), 2),
+        "support": round(float(support), 2),
+        "resistance": round(float(resistance), 2),
+        "volume": volume,
+        "trend": trend,
+        "mtf_trend": mtf_trend,
+        "spread": round(tick.ask - tick.bid, 2),
+        "side": "SELL"  # Indicate this is for SELL bot
+    }
+    
+    return market_data
+
+
+def get_gemini_trading_signal_sell(market_data):
+    """
+    Get trading signal from Gemini AI for SELL side
+    Returns: dict with signal, confidence, entry, stop_loss, take_profit, reason
+    """
+    global ai_decision_cache
+    
+    if not GEMINI_ENABLED:
+        return None
+    
+    # Check cache
+    now = time.time()
+    if ai_decision_cache['signal'] and (now - ai_decision_cache['timestamp']) < GEMINI_CACHE_DURATION:
+        log.info(
+            f"Using cached AI decision: {ai_decision_cache['signal']} (confidence: {ai_decision_cache['confidence']}%)",
+            throttle_key="ai_cache",
+            throttle_interval=30
+        )
+        return ai_decision_cache
+    
+    try:
+        # Prepare prompt for SELL side
+        market_data_json = json.dumps(market_data, indent=2)
+        
+        prompt = f"""
+You are a professional gold (XAU/USD) SELL-side trading AI. Analyze the market data and return ONLY valid JSON.
+
+Market Data:
+{market_data_json}
+
+Trading Rules for SELL:
+1. SELL when:
+   - Trend is BEARISH or STRONG_BEARISH
+   - RSI between 30-70 (not oversold)
+   - MACD < MACD_Signal (bearish crossover)
+   - Price near resistance or breaking support (breakdown)
+   - Multi-timeframe trend confirms bearish
+
+2. BUY when:
+   - Trend is BULLISH or STRONG_BULLISH
+   - RSI between 30-70 (not overbought)
+   - MACD > MACD_Signal (bullish crossover)
+   - Price near support or breaking resistance
+   - Multi-timeframe trend confirms bullish
+
+3. HOLD when:
+   - Conflicting signals
+   - RSI overbought (>70) or oversold (<30)
+   - Low confidence
+   - Mixed multi-timeframe trend
+
+Return ONLY this JSON format (no markdown, no explanation):
+{{
+  "signal": "SELL|BUY|HOLD",
+  "confidence": 0-100,
+  "entry": price_level,
+  "stop_loss": price_level,
+  "take_profit_1": price_level,
+  "take_profit_2": price_level,
+  "reason": "brief_explanation"
+}}
+"""
+        
+        # Call Gemini API
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt
+        )
+        
+        # Parse response
+        response_text = response.text.strip()
+        
+        # Remove markdown code blocks if present
+        if response_text.startswith("```"):
+            response_text = response_text.split("```")[1]
+            if response_text.startswith("json"):
+                response_text = response_text[4:]
+            response_text = response_text.strip()
+        
+        result = json.loads(response_text)
+        
+        # Validate result
+        required_keys = ["signal", "confidence", "entry", "stop_loss", "take_profit_1", "take_profit_2", "reason"]
+        if not all(key in result for key in required_keys):
+            log.error(f"Invalid AI response format: {result}")
+            return None
+        
+        # Cache the decision
+        ai_decision_cache = {
+            'signal': result['signal'],
+            'confidence': result['confidence'],
+            'entry': result['entry'],
+            'stop_loss': result['stop_loss'],
+            'take_profit_1': result['take_profit_1'],
+            'take_profit_2': result['take_profit_2'],
+            'reason': result['reason'],
+            'timestamp': now
+        }
+        
+        log.info(
+            f"AI Decision (SELL): {result['signal']} | Confidence: {result['confidence']}% | Reason: {result['reason']}",
+            throttle_key="ai_decision",
+            throttle_interval=10
+        )
+        
+        return result
+        
+    except json.JSONDecodeError as e:
+        log.error(f"Failed to parse AI response as JSON: {e}")
+        return None
+    except Exception as e:
+        error_msg = str(e)
+        if "UNAVAILABLE" in error_msg or "503" in error_msg:
+            log.warning(f"Gemini API temporarily unavailable (high demand) - will retry later", throttle_key="api_unavailable", throttle_interval=60)
+        elif "RESOURCE_EXHAUSTED" in error_msg or "429" in error_msg:
+            log.warning(f"Gemini API rate limit reached - will use cache", throttle_key="rate_limit", throttle_interval=60)
+        else:
+            log.error(f"Gemini API error: {e}", exc_info=True)
+        return None
 
 
 def higher_tf_bearish():
@@ -1040,9 +1273,9 @@ def grid_engine(df, mtf_data=None):
             sr_info = ""
             if trend_analysis['sr_analysis']:
                 sr = trend_analysis['sr_analysis']
-                sr_info = f" | SR: Res={sr['distance_to_resistance']:.1f if sr['distance_to_resistance'] else 'N/A'} " \
-                         f"Sup={sr['distance_to_support']:.1f if sr['distance_to_support'] else 'N/A'} " \
-                         f"Breakdown={sr['breakdown_detected']}"
+                res_dist = f"{sr['distance_to_resistance']:.1f}" if sr['distance_to_resistance'] is not None else 'N/A'
+                sup_dist = f"{sr['distance_to_support']:.1f}" if sr['distance_to_support'] is not None else 'N/A'
+                sr_info = f" | SR: Res={res_dist} Sup={sup_dist} Breakdown={sr['breakdown_detected']}"
             
             log.info(
                 f"MTF Trend (SELL) | M1:{trend_analysis['M1_bearish']} | "
@@ -1061,6 +1294,39 @@ def grid_engine(df, mtf_data=None):
             last_entry = entry_times[-1]
             if time.time() - last_entry < MIN_ENTRY_DELAY:
                 return
+        
+        # ✅ NEW: Get AI trading signal if enabled (SELL side)
+        ai_signal = None
+        if GEMINI_ENABLED:
+            sr_analysis = trend_analysis['sr_analysis'] if trend_analysis else None
+            market_data = prepare_market_data_for_ai_sell(df, mtf_data, sr_analysis)
+            
+            if market_data:
+                ai_signal = get_gemini_trading_signal_sell(market_data)
+                
+                if ai_signal:
+                    # AI overrides if confidence is high
+                    if ai_signal['confidence'] >= 70:
+                        if ai_signal['signal'] == 'HOLD':
+                            log.warning(
+                                f"AI BLOCKS SELL entry - Signal: {ai_signal['signal']} | Confidence: {ai_signal['confidence']}% | Reason: {ai_signal['reason']}",
+                                throttle_key="ai_block",
+                                throttle_interval=30
+                            )
+                            return
+                        elif ai_signal['signal'] == 'BUY':
+                            log.warning(
+                                f"AI suggests BUY (not SELL) - Confidence: {ai_signal['confidence']}% | Reason: {ai_signal['reason']}",
+                                throttle_key="ai_buy_signal",
+                                throttle_interval=30
+                            )
+                            return
+                        elif ai_signal['signal'] == 'SELL':
+                            log.info(
+                                f"✅ AI CONFIRMS SELL - Confidence: {ai_signal['confidence']}% | Reason: {ai_signal['reason']}",
+                                throttle_key="ai_confirm",
+                                throttle_interval=60
+                            )
         
         # ✅ ENHANCED: Use multi-timeframe confirmation with S/R for first entry
         if trend_analysis:
