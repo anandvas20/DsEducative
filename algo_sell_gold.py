@@ -241,11 +241,45 @@ MAX_DAILY_LOSS = 200.0
 # =========================================================
 
 GEMINI_API_KEY = "" # Set via environment variable
-GEMINI_MODEL = "gemini-2.5-flash" # Full model path for google-genai package
+GEMINI_MODEL = "gemini-3.1-flash-lite" # Full model path for google-genai package
 GEMINI_ENABLED = GEMINI_AVAILABLE and len(GEMINI_API_KEY) > 0
-GEMINI_CACHE_DURATION = 180  # Cache AI decisions for 180 seconds (3 minutes)
 
-# AI decision cache
+# Background updater configuration - OPTIMIZED FOR FREE TIER
+# Free Tier Limits (gemini-2.5-flash): 10 RPM, 1,500 RPD
+# Alternative: gemini-2.5-flash-lite has 15 RPM for faster updates
+GEMINI_UPDATE_INTERVAL = 600  # Update cache every 10 minutes (144 requests/day - safe for free tier)
+GEMINI_RATE_LIMIT_COOLDOWN = 600  # Cooldown period after rate limit (10 minutes)
+GEMINI_MAX_RETRIES = 2  # Maximum retry attempts (reduced to avoid RPM breach)
+GEMINI_RETRY_DELAY = 90  # Base retry delay in seconds (>60s to avoid RPM limit)
+
+# Thread-safe AI cache
+gemini_thread_lock = threading.Lock()
+gemini_ai_cache = {
+    'signal': None,
+    'confidence': 0,
+    'entry': 0,
+    'stop_loss': 0,
+    'take_profit_1': 0,
+    'take_profit_2': 0,
+    'reason': '',
+    'timestamp': 0,
+    'is_valid': False
+}
+
+# Rate limit tracker
+gemini_rate_limit_tracker = {
+    'last_error_time': 0,
+    'error_count': 0,
+    'in_cooldown': False,
+    'cooldown_until': 0,
+    'last_update_attempt': 0
+}
+
+# Background thread reference and control
+gemini_background_thread = None
+gemini_thread_running = True
+
+# Legacy cache for backward compatibility (deprecated)
 ai_decision_cache = {
     'signal': None,
     'timestamp': 0,
@@ -491,31 +525,23 @@ def prepare_market_data_for_ai_sell(df, mtf_data=None, sr_analysis=None):
     return market_data
 
 
-def get_gemini_trading_signal_sell(market_data):
+def update_gemini_cache_background(market_data):
     """
-    Get trading signal from Gemini AI for SELL side
-    Returns: dict with signal, confidence, entry, stop_loss, take_profit, reason
+    Update Gemini AI cache in background thread with retry logic
+    This function handles API calls and rate limiting
     """
-    global ai_decision_cache
+    global gemini_ai_cache, gemini_rate_limit_tracker
     
     if not GEMINI_ENABLED:
-        return None
+        return
     
-    # Check cache
-    now = time.time()
-    if ai_decision_cache['signal'] and (now - ai_decision_cache['timestamp']) < GEMINI_CACHE_DURATION:
-        log.info(
-            f"Using cached AI decision: {ai_decision_cache['signal']} (confidence: {ai_decision_cache['confidence']}%)",
-            throttle_key="ai_cache",
-            throttle_interval=30
-        )
-        return ai_decision_cache
-    
-    try:
-        # Prepare prompt for SELL side
-        market_data_json = json.dumps(market_data, indent=2)
-        
-        prompt = f"""
+    retry_count = 0
+    while retry_count < GEMINI_MAX_RETRIES:
+        try:
+            # Prepare prompt for SELL side
+            market_data_json = json.dumps(market_data, indent=2)
+            
+            prompt = f"""
 You are a professional gold (XAU/USD) SELL-side trading AI. Analyze the market data and return ONLY valid JSON.
 
 Market Data:
@@ -553,65 +579,248 @@ Return ONLY this JSON format (no markdown, no explanation):
   "reason": "brief_explanation"
 }}
 """
-        
-        # Call Gemini API
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt
-        )
-        
-        # Parse response
-        response_text = response.text.strip()
-        
-        # Remove markdown code blocks if present
-        if response_text.startswith("```"):
-            response_text = response_text.split("```")[1]
-            if response_text.startswith("json"):
-                response_text = response_text[4:]
-            response_text = response_text.strip()
-        
-        result = json.loads(response_text)
-        
-        # Validate result
-        required_keys = ["signal", "confidence", "entry", "stop_loss", "take_profit_1", "take_profit_2", "reason"]
-        if not all(key in result for key in required_keys):
-            log.error(f"Invalid AI response format: {result}")
+            
+            # Call Gemini API
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            
+            response = client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=prompt
+            )
+            
+            # Parse response
+            response_text = response.text.strip()
+            
+            # Remove markdown code blocks if present
+            if response_text.startswith("```"):
+                response_text = response_text.split("```")[1]
+                if response_text.startswith("json"):
+                    response_text = response_text[4:]
+                response_text = response_text.strip()
+            
+            result = json.loads(response_text)
+            
+            # Validate result
+            required_keys = ["signal", "confidence", "entry", "stop_loss", "take_profit_1", "take_profit_2", "reason"]
+            if not all(key in result for key in required_keys):
+                log.error(f"Invalid AI response format: {result}")
+                return
+            
+            # Update cache (thread-safe)
+            with gemini_thread_lock:
+                gemini_ai_cache.update({
+                    'signal': result['signal'],
+                    'confidence': result['confidence'],
+                    'entry': result['entry'],
+                    'stop_loss': result['stop_loss'],
+                    'take_profit_1': result['take_profit_1'],
+                    'take_profit_2': result['take_profit_2'],
+                    'reason': result['reason'],
+                    'timestamp': time.time(),
+                    'is_valid': True
+                })
+                
+                # Reset error tracking on success
+                gemini_rate_limit_tracker['error_count'] = 0
+                gemini_rate_limit_tracker['in_cooldown'] = False
+            
+            log.info(
+                f"AI Cache Updated: {result['signal']} | Confidence: {result['confidence']}% | Reason: {result['reason']}"
+            )
+            return
+            
+        except json.JSONDecodeError as e:
+            log.error(f"Failed to parse AI response as JSON: {e}")
+            return
+            
+        except Exception as e:
+            error_msg = str(e)
+            
+            # Handle rate limit errors (429)
+            if "RESOURCE_EXHAUSTED" in error_msg or "429" in error_msg:
+                retry_count += 1
+                
+                with gemini_thread_lock:
+                    gemini_rate_limit_tracker['last_error_time'] = time.time()
+                    gemini_rate_limit_tracker['error_count'] += 1
+                
+                # Extract retry delay from error if available
+                retry_delay = GEMINI_RETRY_DELAY * (2 ** (retry_count - 1))  # Exponential backoff
+                
+                if retry_count < GEMINI_MAX_RETRIES:
+                    log.warning(
+                        f"Gemini API rate limit hit (attempt {retry_count}/{GEMINI_MAX_RETRIES}). Retrying in {retry_delay}s..."
+                    )
+                    time.sleep(retry_delay)
+                else:
+                    # Enter cooldown mode after max retries
+                    with gemini_thread_lock:
+                        gemini_rate_limit_tracker['in_cooldown'] = True
+                        gemini_rate_limit_tracker['cooldown_until'] = time.time() + GEMINI_RATE_LIMIT_COOLDOWN
+                    
+                    log.warning(
+                        f"Gemini API rate limit exceeded. Entering cooldown for {GEMINI_RATE_LIMIT_COOLDOWN}s."
+                    )
+                    return
+            
+            # Handle temporary unavailability (503)
+            elif "UNAVAILABLE" in error_msg or "503" in error_msg:
+                log.warning(
+                    f"Gemini API temporarily unavailable (high demand) - will retry later",
+                    throttle_key="api_unavailable",
+                    throttle_interval=60
+                )
+                return
+            
+            else:
+                log.error(f"Gemini API error: {e}", exc_info=True)
+                return
+
+
+def gemini_background_updater():
+    """
+    Background thread that periodically updates Gemini AI cache
+    Runs independently and never blocks main trading logic
+    """
+    global gemini_rate_limit_tracker, gemini_thread_running
+    
+    log.info("Gemini AI background updater started")
+    
+    while gemini_thread_running:
+        try:
+            # Check if MT5 connection is alive
+            if not mt5_alive():
+                log.warning("MT5 connection lost. Waiting to reconnect...", throttle_key="mt5_connection", throttle_interval=30)
+                time.sleep(5)
+                continue
+            
+            # Check if in cooldown
+            with gemini_thread_lock:
+                if gemini_rate_limit_tracker['in_cooldown']:
+                    remaining = gemini_rate_limit_tracker['cooldown_until'] - time.time()
+                    if remaining > 0:
+                        log.info(
+                            f"Gemini API in cooldown. Remaining: {int(remaining)}s. Cache update skipped.",
+                            throttle_key="cooldown_status",
+                            throttle_interval=60
+                        )
+                        time.sleep(GEMINI_UPDATE_INTERVAL)
+                        continue
+                    else:
+                        # Cooldown ended
+                        gemini_rate_limit_tracker['in_cooldown'] = False
+                        gemini_rate_limit_tracker['error_count'] = 0
+                        log.info("Gemini API cooldown period ended. Resuming cache updates.")
+            
+            # Fetch fresh data frames to calculate indicators
+            mtf_data = get_multi_timeframe_data()
+            
+            # Use M1 data if available, otherwise fallback to M5
+            df = mtf_data.get('M1') if mtf_data and 'M1' in mtf_data else get_market_data(200)
+            
+            if df is not None and len(df) >= 20:
+                # Calculate Support/Resistance data from M5 timeframe
+                sr_analysis = None
+                if mtf_data and 'M5' in mtf_data:
+                    sr_analysis = detect_support_resistance_sell(mtf_data['M5'], lookback=50)
+                
+                # Format the proper rich JSON payload the prompt expects
+                market_data = prepare_market_data_for_ai_sell(df, mtf_data, sr_analysis)
+                
+                if market_data:
+                    # Update cache in background
+                    with gemini_thread_lock:
+                        gemini_rate_limit_tracker['last_update_attempt'] = time.time()
+                    
+                    update_gemini_cache_background(market_data)
+            
+            # Sleep until next update
+            time.sleep(GEMINI_UPDATE_INTERVAL)
+            
+        except Exception as e:
+            log.error(f"Error in Gemini background updater: {e}", exc_info=True)
+            time.sleep(30)  # Shorter sleep on error to retry sooner
+
+
+def start_gemini_background_updater():
+    """
+    Start the Gemini AI background updater thread
+    """
+    global gemini_background_thread, gemini_thread_running
+    
+    if not GEMINI_ENABLED:
+        log.info("Gemini AI disabled. Background updater not started.")
+        return
+    
+    if gemini_background_thread and gemini_background_thread.is_alive():
+        log.warning("Gemini background updater already running")
+        return
+    
+    gemini_thread_running = True
+    gemini_background_thread = threading.Thread(
+        target=gemini_background_updater,
+        daemon=True,
+        name="GeminiBackgroundUpdater"
+    )
+    gemini_background_thread.start()
+    log.info("Gemini AI background updater thread started")
+
+
+def stop_gemini_background_updater():
+    """
+    Stop the Gemini AI background updater thread gracefully
+    """
+    global gemini_thread_running, gemini_background_thread
+    
+    if not GEMINI_ENABLED or not gemini_background_thread:
+        return
+    
+    log.info("Stopping Gemini AI background updater...")
+    gemini_thread_running = False
+    
+    # Wait for thread to finish (max 5 seconds)
+    if gemini_background_thread.is_alive():
+        gemini_background_thread.join(timeout=5)
+    
+    log.info("Gemini AI background updater stopped")
+
+
+def get_gemini_trading_signal_sell(market_data=None):
+    """
+    Get trading signal from Gemini AI cache (non-blocking)
+    This function ONLY reads from cache - never makes API calls
+    Returns: dict with signal, confidence, entry, stop_loss, take_profit, reason or None
+    """
+    if not GEMINI_ENABLED:
+        return None
+    
+    # Read from cache (thread-safe)
+    with gemini_thread_lock:
+        if not gemini_ai_cache['is_valid']:
             return None
         
-        # Cache the decision
-        ai_decision_cache = {
-            'signal': result['signal'],
-            'confidence': result['confidence'],
-            'entry': result['entry'],
-            'stop_loss': result['stop_loss'],
-            'take_profit_1': result['take_profit_1'],
-            'take_profit_2': result['take_profit_2'],
-            'reason': result['reason'],
-            'timestamp': now
+        # Check cache age
+        cache_age = time.time() - gemini_ai_cache['timestamp']
+        
+        # Warn if cache is stale (older than 2x update interval)
+        if cache_age > (GEMINI_UPDATE_INTERVAL * 2):
+            log.warning(
+                f"AI cache is stale ({int(cache_age)}s old). Using anyway.",
+                throttle_key="stale_cache",
+                throttle_interval=60
+            )
+        
+        # Return cached data
+        return {
+            'signal': gemini_ai_cache['signal'],
+            'confidence': gemini_ai_cache['confidence'],
+            'entry': gemini_ai_cache['entry'],
+            'stop_loss': gemini_ai_cache['stop_loss'],
+            'take_profit_1': gemini_ai_cache['take_profit_1'],
+            'take_profit_2': gemini_ai_cache['take_profit_2'],
+            'reason': gemini_ai_cache['reason'],
+            'timestamp': gemini_ai_cache['timestamp']
         }
-        
-        log.info(
-            f"AI Decision (SELL): {result['signal']} | Confidence: {result['confidence']}% | Reason: {result['reason']}",
-            throttle_key="ai_decision",
-            throttle_interval=10
-        )
-        
-        return result
-        
-    except json.JSONDecodeError as e:
-        log.error(f"Failed to parse AI response as JSON: {e}")
-        return None
-    except Exception as e:
-        error_msg = str(e)
-        if "UNAVAILABLE" in error_msg or "503" in error_msg:
-            log.warning(f"Gemini API temporarily unavailable (high demand) - will retry later", throttle_key="api_unavailable", throttle_interval=60)
-        elif "RESOURCE_EXHAUSTED" in error_msg or "429" in error_msg:
-            log.warning(f"Gemini API rate limit reached - will use cache", throttle_key="rate_limit", throttle_interval=60)
-        else:
-            log.error(f"Gemini API error: {e}", exc_info=True)
-        return None
 
 
 def higher_tf_bearish():
@@ -901,13 +1110,24 @@ def last_sell_price():
 
 
 def dynamic_tp_target(total_lot, position_count):
-    """Calculate dynamic take profit target - simplified for quick exits"""
-    # Quick exit for single position
-    if position_count <= 1:
+    """Calculate dynamic take profit target based on grid depth"""
+    # Scale TP target with number of grid positions
+    # More positions = deeper drawdown = higher profit needed
+    
+    
+    # Quick exit for single 0.01 lot position
+    if position_count == 1 and total_lot <= 0.01:
         return 1.0
     
-    # Scale primarily with lot size for deeper positions
-    return max(1.0, total_lot * 5)
+    base_target = 1.0
+    
+    # Exponential scaling: deeper grid needs proportionally more profit
+    position_multiplier = math.pow(position_count, 1.5)
+    
+    # Also scale with lot size
+    lot_component = total_lot * 1.3
+    
+    return base_target + position_multiplier + lot_component
 
 
 def mt5_alive():
@@ -1606,6 +1826,10 @@ if __name__ == "__main__":
     
     try:
         init_mt5()
+        
+        # Start Gemini AI background updater
+        start_gemini_background_updater()
+        
         bot_loop()
 
     except KeyboardInterrupt:
@@ -1626,7 +1850,12 @@ if __name__ == "__main__":
         traceback.print_exc()
         
     finally:
-        print("\nShutting down MT5...")
+        print("\nShutting down...")
+        
+        # Stop Gemini background updater
+        stop_gemini_background_updater()
+        
+        # Shutdown MT5
         mt5.shutdown()
         print("MT5 shutdown complete")
         print("=" * 60)
